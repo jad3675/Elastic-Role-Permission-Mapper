@@ -1,38 +1,51 @@
-# Elastic Role Permission Mapper
+# Enhanced Elastic Role Permission Mapper
 
-A comprehensive GUI tool for analyzing and visualizing Elastic Cloud Kibana permissions and Elasticsearch cluster privileges.
+A comprehensive GUI tool for analyzing and visualizing Elastic Cloud Kibana permissions and Elasticsearch cluster privileges with **detailed sub-feature permission analysis**.
 
 ## 🎯 Overview
 
-The Elastic Role Permission Mapper helps security administrators, DevOps teams, and compliance officers understand and audit their Elasticsearch/Kibana access controls by providing:
+The Enhanced Elastic Role Permission Mapper helps security administrators, DevOps teams, and compliance officers understand and audit their Elasticsearch/Kibana access controls by providing:
 
+- **🔬 Detailed permission analysis** - Granular breakdown of sub-feature permissions and raw privileges
 - **Interactive role filtering** - Focus on specific roles across all views
-- **Tabbed interface** - Separate views for Kibana permissions vs Elasticsearch privileges  
+- **Enhanced tabbed interface** - Separate views for detailed analysis, Kibana overview, and Elasticsearch privileges
 - **Permission matrix** - Visual grid showing role access to Kibana features
 - **SAML mapping analysis** - See which SAML groups get which roles
 - **Cluster privilege breakdown** - Detailed view of Elasticsearch permissions
-- **Export capabilities** - Generate HTML reports and CSV exports
+- **Advanced export capabilities** - Generate enhanced HTML reports and detailed CSV exports
 
 ## 🚀 Features
 
-### 📊 **Role Analysis**
-- **Permission Matrix**: Visual grid showing role access levels (Admin/Write/Read/None) for all Kibana features
+### 🔬 **NEW: Detailed Permission Analysis**
+- **Sub-Feature Breakdown**: Captures granular permissions like "Create Short URLs", "Store Search Sessions", etc.
+- **Minimal Permissions**: Identifies roles with custom sub-feature configurations
+- **Raw Privilege Display**: Shows exact privilege strings from Elasticsearch API
+- **Feature-Specific Analysis**: Drill down into individual features to see all granted permissions
+- **Global vs Feature Permissions**: Distinguishes between global privileges and feature-specific grants
+
+### 📊 **Enhanced Role Analysis**
+- **Permission Matrix**: Visual grid showing role access levels (Admin/Write/Read/Custom/None) for all Kibana features
+- **NEW: Custom Permission Level**: Identifies roles with granular sub-feature permissions
 - **Role Distribution**: Categorizes roles by function (Admin, Analyst, Viewer, Custom)
 - **Interactive Filtering**: Click any role to filter all views to show only that role's permissions
+- **Space-Specific Permissions**: Shows how permissions apply to different Kibana spaces
 
 ### 🔗 **SAML Integration**
 - **Mapping Visualization**: Shows which SAML groups are assigned to which roles
 - **Group Analysis**: Identifies SAML attribute mappings and role assignments
+- **Role Assignment Tracking**: See complete SAML group → role → permission chain
 
 ### ⚙️ **Elasticsearch Privileges**
 - **Cluster Permissions**: Shows cluster-level privileges (monitor, manage, all, etc.)
 - **Index Patterns**: Displays index-level permissions with expandable details
 - **Smart Collapsing**: Roles with many privileges show summary with expand/collapse functionality
+- **Privilege Categorization**: Organizes permissions by cluster vs index level
 
-### 📋 **Export Options**
-- **HTML Reports**: Beautiful, interactive reports with filtering and tabs
-- **CSV Export**: Role permission matrix for spreadsheet analysis
-- **Browser View**: Quick preview without saving files
+### 📋 **Advanced Export Options**
+- **Enhanced HTML Reports**: Beautiful, interactive reports with detailed permission breakdown
+- **Detailed CSV Export**: Now includes raw privileges, global permissions, and feature-specific data
+- **Browser View**: Quick preview with all enhanced features
+- **Filtering Across Tabs**: Role filtering works across all views including detailed analysis
 
 ## 🛠️ Installation
 
@@ -41,7 +54,7 @@ The Elastic Role Permission Mapper helps security administrators, DevOps teams, 
 - Elasticsearch client library (8.x recommended)
 
 ### Setup
-1. **Clone or download** the `elastic_role_mapper.py` file
+1. **Clone or download** the enhanced `kibana_role_mapper.py` file
 
 2. **Install dependencies**:
    ```bash
@@ -55,7 +68,7 @@ The Elastic Role Permission Mapper helps security administrators, DevOps teams, 
 
 3. **Run the application**:
    ```bash
-   python elastic_role_mapper.py
+   python kibana_role_mapper.py
    ```
 
 ## 🔧 Usage
@@ -67,80 +80,101 @@ The Elastic Role Permission Mapper helps security administrators, DevOps teams, 
    - **API Key**: Either `id:secret` format or base64 encoded
 3. **Click Connect** - Status will show "Connected successfully"
 
-### Data Analysis
-1. **Fetch Role Data** - Click to retrieve all roles and mappings from your cluster
+### Enhanced Data Analysis
+1. **Fetch Role Data** - Click to retrieve all roles with detailed permission analysis
 2. **Choose your view**:
-   - **"Open in Browser"** - Quick interactive preview
-   - **"Generate HTML Report"** - Save report to file
-   - **"Export to CSV"** - Export permission matrix
+   - **"Open in Browser"** - Quick interactive preview with all enhanced features
+   - **"Generate HTML Report"** - Save detailed report to file
+   - **"Export to CSV"** - Export enhanced permission matrix with raw privilege data
 
 ### Interactive Features
 
-#### 🔍 **Role Filtering**
+#### 🔍 **Enhanced Role Filtering**
 - **Role Pills**: Click any role name to filter all views to that role
 - **Search Box**: Type to find specific roles quickly
 - **Clear Filter**: Reset to show all roles
+- **Cross-Tab Filtering**: Filtering works across all three tabs
 
-#### 📑 **Tabbed Interface**
-- **🎛️  Permissions**: Role matrix, SAML mappings, distribution analysis
+#### 📑 **Enhanced Tabbed Interface**
+- **🔬 Detailed Permissions**: NEW - Granular analysis of sub-features and raw privileges
+- **🎛️ Kibana Overview**: Role matrix, SAML mappings, distribution analysis, space permissions
 - **⚙️ Cluster Privileges**: Elasticsearch cluster and index permissions
 
-#### 🎛️ **Expandable Content**
-- **Cluster Privileges**: Roles with many privileges show "+X more" - click to expand
-- **Index Patterns**: Click summaries to see detailed index privilege patterns
+#### 🎛️ **NEW: Expandable Detailed Content**
+- **Role Details**: Click "Show Details" to expand full permission breakdown
+- **Sub-Feature Display**: See minimal permissions and custom configurations
+- **Raw Privilege Access**: Toggle display of exact privilege strings
+- **Feature-Specific Raw Data**: View privileges granted for each specific feature
 
-## 📊 Report Sections
+## 📊 Enhanced Report Sections
 
-###  Permissions Tab
-- **Role Permission Matrix**: Grid showing role access to Discover, Dashboard, Visualize, etc.
+### 🔬 NEW: Detailed Permissions Tab
+- **Role Cards**: Expandable cards showing complete permission breakdown
+- **Global Privileges**: Shows cluster-wide permissions like "all" or "read"
+- **Feature Breakdown**: Detailed analysis of each Kibana feature's permissions
+- **Sub-Feature Display**: Shows minimal permissions, custom configurations
+- **Raw Privilege Access**: Complete privilege strings with toggle display
+- **Privilege Statistics**: Count of total privileges per role
+
+### 🎛️ Enhanced Kibana Overview Tab
+- **Space-Specific Permissions**: Shows how permissions apply to different Kibana spaces
+- **Role Permission Matrix**: Grid showing role access with new "Custom" level
 - **SAML Role Mappings**: Cards showing SAML group → role assignments
 - **Role Distribution**: Bar chart categorizing roles by function
 
-### Cluster Privileges Tab  
+### ⚙️ Cluster Privileges Tab  
 - **Elasticsearch Privileges**: Detailed cluster and index permissions for each role
 - **Expandable Details**: Smart handling of roles with many privileges
 - **Organized Display**: Clean cards showing both cluster and index permissions
 
-## 🔐 Security & Compliance
+## 🔐 Enhanced Security & Compliance
 
 ### Use Cases
-- **Security Audits**: Understand who has access to what
-- **Compliance Reporting**: Generate documentation for auditors
-- **Access Reviews**: Regular review of role assignments and privileges
-- **Troubleshooting**: Debug user access issues by examining role permissions
-- **Role Optimization**: Identify redundant or overprivileged roles
+- **Detailed Security Audits**: Understand granular sub-feature access permissions
+- **Compliance Reporting**: Generate comprehensive documentation with raw privilege data
+- **Access Reviews**: Detailed review of role assignments and sub-feature permissions
+- **Permission Troubleshooting**: Debug user access issues with detailed privilege analysis
+- **Role Optimization**: Identify redundant permissions at the sub-feature level
+- **Sub-Feature Analysis**: Understand which roles have access to specific Kibana sub-features
 
 ### Best Practices
-- **Regular Reviews**: Generate reports monthly or quarterly
-- **Principle of Least Privilege**: Use reports to identify overprivileged roles
-- **Documentation**: Save HTML reports for compliance records
-- **Change Tracking**: Compare reports over time to track permission changes
+- **Granular Reviews**: Use detailed analysis to review sub-feature permissions
+- **Raw Privilege Auditing**: Review actual privilege strings for compliance
+- **Custom Permission Analysis**: Monitor roles with "Custom" permission levels
+- **Space-Specific Auditing**: Review permissions across different Kibana spaces
+- **Sub-Feature Governance**: Establish policies for sub-feature access
 
-## 🎨 Output Examples
+## 🎨 Enhanced Output Examples
 
-### HTML Report Features
-- **Interactive filtering** by role
-- **Tabbed navigation** between Kibana and ES permissions  
-- **Color-coded permissions** (Red=Admin, Blue=Write, Green=Read, Gray=None)
-- **Expandable privilege lists** for roles with many permissions
+### Enhanced HTML Report Features
+- **NEW: Detailed Permission Cards** with expandable role analysis
+- **Sub-Feature Visualization** showing minimal and custom permissions
+- **Raw Privilege Display** with toggle functionality
+- **Interactive filtering** across all three tabs
+- **Tabbed navigation** between detailed analysis, Kibana overview, and ES permissions
+- **Enhanced color-coding** (Red=Admin, Blue=Write, Green=Read, Yellow=Custom, Gray=None)
+- **Space-specific permission display**
 - **Responsive design** for desktop and tablet viewing
 
-### CSV Export
-- Simple matrix format: Role names vs Kibana features
-- Easy import into Excel or other analysis tools
-- Suitable for automated processing or further analysis
+### Enhanced CSV Export
+- **Raw Privilege Data**: Complete privilege strings for each feature
+- **Global Privileges Column**: Shows cluster-wide permissions
+- **Privilege Count Statistics**: Number of privileges per role
+- **Feature-Specific Raw Data**: Detailed breakdown by Kibana feature
+- **Enhanced analysis capabilities** for spreadsheet tools
 
 ## ⚠️ Compatibility
 
 ### Elasticsearch Versions
 - **Recommended**: Elasticsearch 8.x clusters with elasticsearch client 8.x
+- **Enhanced Analysis**: Works with all modern privilege structures
 - **Supported**: Works with Elasticsearch 7.x, 8.x, and 9.x clusters
 - **Elastic Cloud**: Optimized for Elastic Cloud deployments
 
 ### Authentication
 - **API Key authentication** (recommended for security)
-- **SAML-based user management** (no local users required)
-- **Role-based access control** analysis
+- **SAML-based user management** with detailed group analysis
+- **Role-based access control** with sub-feature analysis
 
 ## 🐛 Troubleshooting
 
@@ -149,15 +183,27 @@ The Elastic Role Permission Mapper helps security administrators, DevOps teams, 
 - **Authentication failures**: Verify API key format and permissions
 - **Network errors**: Check Cloud ID format and network connectivity
 
-### Missing Data
-- **No SAML mappings**: Normal if using built-in authentication
-- **Empty role data**: Check if API key has sufficient privileges to read security settings
-- **Missing privileges**: Some roles may not have Elasticsearch cluster privileges
+### Enhanced Data Analysis
+- **No detailed permissions**: Normal for simple roles without sub-features
+- **Missing sub-features**: Some roles may only have high-level permissions
+- **Raw privilege access**: Requires appropriate API key permissions
+- **Custom permission display**: Indicates roles with granular sub-feature access
 
 ### Performance
-- **Large role counts**: Tool handles 50+ roles efficiently with filtering
-- **Many privileges**: Smart collapsing keeps interface responsive
-- **Report generation**: HTML reports work well with hundreds of roles
+- **Enhanced analysis**: Tool efficiently handles detailed permission parsing
+- **Large role counts**: Optimized filtering across all tabs
+- **Detailed reports**: HTML generation optimized for comprehensive data display
+
+## 🆕 What's New
+
+### Version 2.0 Enhancements
+- **🔬 Detailed Permission Analysis**: Complete sub-feature permission breakdown
+- **📊 Enhanced Permission Levels**: New "Custom" level for granular permissions
+- **🎯 Raw Privilege Access**: View exact privilege strings from Elasticsearch
+- **🏠 Space-Specific Analysis**: Understand permissions across Kibana spaces
+- **📈 Advanced CSV Export**: Enhanced data export with raw privilege information
+- **🎨 Improved UI**: Three-tab interface with detailed analysis capabilities
+- **🔍 Cross-Tab Filtering**: Role filtering works across all analysis views
 
 ## 📝 License
 
@@ -169,4 +215,4 @@ This is a standalone tool. For feature requests or bug reports, please document 
 
 ---
 
-**Note**: This tool provides read-only analysis of existing permissions. It does not modify roles, users, or security settings in your Elasticsearch cluster.
+**Note**: This enhanced tool provides read-only analysis of existing permissions with detailed sub-feature breakdown. It does not modify roles, users, or security settings in your Elasticsearch cluster.
