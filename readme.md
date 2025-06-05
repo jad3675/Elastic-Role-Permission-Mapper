@@ -54,7 +54,7 @@ The Enhanced Elastic Role Permission Mapper helps security administrators, DevOp
 - Elasticsearch client library (8.x recommended)
 
 ### Setup
-1. **Clone or download** the enhanced `kibana_role_mapper.py` file
+1. **Clone or download** the enhanced `elastic_role_mapper.py` file
 
 2. **Install dependencies**:
    ```bash
@@ -68,7 +68,7 @@ The Enhanced Elastic Role Permission Mapper helps security administrators, DevOp
 
 3. **Run the application**:
    ```bash
-   python kibana_role_mapper.py
+   python elastic_role_mapper.py
    ```
 
 ## 🔧 Usage
