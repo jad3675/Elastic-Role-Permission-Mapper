@@ -11,14 +11,14 @@ import webbrowser
 import tempfile
 import os
 from datetime import datetime
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import threading
 import re
 
 try:
     from elasticsearch import Elasticsearch
     from elasticsearch.exceptions import AuthenticationException as AuthenticationError
-    from elasticsearch.exceptions import ConnectionError as ESConnectionError
+    from elasticsearch.exceptions import ConnectionError as ESConnectionError, NotFoundError
 except ImportError as e:
     print(f"Please install elasticsearch 8.x: pip install 'elasticsearch>=8.0,<9.0'")
     print(f"Import error details: {e}")
@@ -30,37 +30,76 @@ class KibanaRoleMapper:
         self.roles_data = {}
         self.mappings_data = {}
         self.connected = False
-        
-    def connect(self, cloud_id: str, api_key: str) -> bool:
-        """Connect to Elastic Cloud - optimized for ES 8.x"""
+
+    def connect(self, connection_params: Dict) -> bool:
+        """Connect to Elasticsearch (Cloud or Local) - optimized for ES 8.x"""
         try:
-            # Parse API key if it's in id:key format
-            if ':' in api_key:
-                api_key_id, api_key_secret = api_key.split(':', 1)
-                auth = (api_key_id, api_key_secret)
+            connection_type = connection_params.get('type', 'cloud')
+
+            if connection_type == 'cloud':
+                cloud_id = connection_params.get('cloud_id')
+                api_key_str = connection_params.get('api_key')
+                if not cloud_id or not api_key_str:
+                    raise ValueError("Cloud ID and API Key are required for Elastic Cloud connection.")
+
+                if ':' in api_key_str:
+                    api_key_id, api_key_secret = api_key_str.split(':', 1)
+                    auth_param = (api_key_id, api_key_secret)
+                else:
+                    auth_param = api_key_str # Assumed base64 encoded
+
+                self.es = Elasticsearch(
+                    cloud_id=cloud_id,
+                    api_key=auth_param,
+                    request_timeout=30
+                )
+            elif connection_type == 'local':
+                hosts = connection_params.get('hosts')
+                if not hosts:
+                    raise ValueError("Host(s) are required for local Elasticsearch connection.")
+
+                auth_type = connection_params.get('auth_type', 'none')
+                auth_param = None
+                
+                if auth_type == 'api_key':
+                    api_key_str = connection_params.get('api_key')
+                    if not api_key_str:
+                        raise ValueError("API Key is required for local API key authentication.")
+                    if ':' in api_key_str:
+                        api_key_id, api_key_secret = api_key_str.split(':', 1)
+                        auth_param = (api_key_id, api_key_secret)
+                    else:
+                        # For local, it might just be the key itself if not id:secret
+                        auth_param = api_key_str
+                    self.es = Elasticsearch(hosts=hosts, api_key=auth_param, request_timeout=30)
+
+                elif auth_type == 'basic_auth':
+                    username = connection_params.get('username')
+                    password = connection_params.get('password')
+                    if not username: # Password can be empty
+                        raise ValueError("Username is required for basic authentication.")
+                    auth_param = (username, password)
+                    self.es = Elasticsearch(hosts=hosts, basic_auth=auth_param, request_timeout=30)
+                
+                else: # 'none' or unrecognized
+                    self.es = Elasticsearch(hosts=hosts, request_timeout=30)
             else:
-                # Assume it's already base64 encoded
-                auth = api_key
-            
-            # ES 8.x optimized configuration
-            self.es = Elasticsearch(
-                cloud_id=cloud_id,
-                api_key=auth,
-                request_timeout=30
-            )
-            
+                raise ValueError(f"Unsupported connection type: {connection_type}")
+
             # Test connection
             info = self.es.info()
             self.connected = True
             return True
-            
-        except AuthenticationError:
-            raise Exception("Authentication failed. Check your API key.")
-        except ESConnectionError:
-            raise Exception("Connection failed. Check your Cloud ID.")
+
+        except AuthenticationError as e:
+            raise Exception(f"Authentication failed. Check your credentials. Details: {str(e)}")
+        except ESConnectionError as e:
+            raise Exception(f"Connection failed. Check your connection parameters (Cloud ID or Host). Details: {str(e)}")
+        except ValueError as e: # For parameter validation
+            raise Exception(str(e))
         except Exception as e:
             raise Exception(f"Connection error: {str(e)}")
-    
+
     def fetch_data(self) -> Dict:
         """Fetch roles and mappings from Elasticsearch"""
         if not self.connected:
@@ -274,8 +313,64 @@ class KibanaMapperGUI:
         self.mapper = KibanaRoleMapper()
         self.data = None
         self.analysis = None
+
+        # Connection type and details
+        self.connection_type_var = tk.StringVar(value="cloud")
+        self.cloud_id_var = tk.StringVar()
+        self.api_key_var = tk.StringVar() # Used for both cloud and local API key auth
+
+        self.local_hosts_var = tk.StringVar(value="http://localhost:9200")
+        self.local_auth_type_var = tk.StringVar(value="none")
+        # self.local_api_key_var = tk.StringVar() # Re-use self.api_key_var
+        self.local_username_var = tk.StringVar()
+        self.local_password_var = tk.StringVar()
         
         self.setup_ui()
+
+    def _toggle_connection_fields(self, *args):
+        conn_type = self.connection_type_var.get()
+        
+        # Cloud fields
+        self.cloud_id_label.grid_remove()
+        self.cloud_id_entry.grid_remove()
+        self.cloud_api_key_label.grid_remove()
+        self.cloud_api_key_entry.grid_remove()
+
+        # Local fields
+        self.local_hosts_label.grid_remove()
+        self.local_hosts_entry.grid_remove()
+        self.local_auth_label.grid_remove()
+        self.local_auth_frame.grid_remove() # Frame containing auth radio buttons
+        self.local_api_key_label.grid_remove()
+        self.local_api_key_entry.grid_remove()
+        self.local_basic_auth_frame.grid_remove() # Frame for username/password
+
+        if conn_type == "cloud":
+            self.conn_frame.config(text="Elastic Cloud Connection")
+            self.cloud_id_label.grid()
+            self.cloud_id_entry.grid()
+            self.cloud_api_key_label.grid()
+            self.cloud_api_key_entry.grid()
+        elif conn_type == "local":
+            self.conn_frame.config(text="Local Elasticsearch Connection")
+            self.local_hosts_label.grid()
+            self.local_hosts_entry.grid()
+            self.local_auth_label.grid()
+            self.local_auth_frame.grid()
+            self._toggle_local_auth_fields() # Further toggle based on auth type
+
+    def _toggle_local_auth_fields(self, *args):
+        auth_type = self.local_auth_type_var.get()
+
+        self.local_api_key_label.grid_remove()
+        self.local_api_key_entry.grid_remove()
+        self.local_basic_auth_frame.grid_remove()
+
+        if auth_type == "api_key":
+            self.local_api_key_label.grid()
+            self.local_api_key_entry.grid()
+        elif auth_type == "basic_auth":
+            self.local_basic_auth_frame.grid()
         
     def setup_ui(self):
         """Setup the GUI"""
@@ -283,36 +378,81 @@ class KibanaMapperGUI:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-        # Connection frame
-        conn_frame = ttk.LabelFrame(main_frame, text="Elastic Cloud Connection", padding="10")
-        conn_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        # Connection frame (dynamically titled)
+        self.conn_frame = ttk.LabelFrame(main_frame, text="Elastic Connection", padding="10")
+        self.conn_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
         
-        # Cloud ID
-        ttk.Label(conn_frame, text="Cloud ID:").grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
-        self.cloud_id_var = tk.StringVar()
-        cloud_id_entry = ttk.Entry(conn_frame, textvariable=self.cloud_id_var, width=60)
-        cloud_id_entry.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        # Connection Type Selection
+        conn_type_frame = ttk.Frame(self.conn_frame)
+        conn_type_frame.grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0,10))
+        ttk.Label(conn_type_frame, text="Connection Type:").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Radiobutton(conn_type_frame, text="Elastic Cloud", variable=self.connection_type_var, value="cloud", command=self._toggle_connection_fields).pack(side=tk.LEFT)
+        ttk.Radiobutton(conn_type_frame, text="Local Instance", variable=self.connection_type_var, value="local", command=self._toggle_connection_fields).pack(side=tk.LEFT, padx=(10,0))
+
+        # --- Cloud Connection Fields ---
+        self.cloud_id_label = ttk.Label(self.conn_frame, text="Cloud ID:")
+        self.cloud_id_label.grid(row=1, column=0, sticky=tk.W, pady=(0, 5))
+        self.cloud_id_entry = ttk.Entry(self.conn_frame, textvariable=self.cloud_id_var, width=60)
+        self.cloud_id_entry.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
         
-        # API Key
-        ttk.Label(conn_frame, text="API Key (id:secret or base64):").grid(row=2, column=0, sticky=tk.W, pady=(0, 5))
-        self.api_key_var = tk.StringVar()
-        api_key_entry = ttk.Entry(conn_frame, textvariable=self.api_key_var, width=60, show="*")
-        api_key_entry.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        self.cloud_api_key_label = ttk.Label(self.conn_frame, text="API Key (id:secret or base64):")
+        self.cloud_api_key_label.grid(row=3, column=0, sticky=tk.W, pady=(0, 5))
+        self.cloud_api_key_entry = ttk.Entry(self.conn_frame, textvariable=self.api_key_var, width=60, show="*")
+        self.cloud_api_key_entry.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        # --- Local Connection Fields ---
+        self.local_hosts_label = ttk.Label(self.conn_frame, text="Host(s) (comma-separated, e.g., http://localhost:9200):")
+        self.local_hosts_label.grid(row=1, column=0, sticky=tk.W, pady=(0, 5))
+        self.local_hosts_entry = ttk.Entry(self.conn_frame, textvariable=self.local_hosts_var, width=60)
+        self.local_hosts_entry.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        self.local_auth_label = ttk.Label(self.conn_frame, text="Authentication:")
+        self.local_auth_label.grid(row=3, column=0, sticky=tk.W, pady=(5,0))
         
-        # Elasticsearch Version Selection
-        ttk.Label(conn_frame, text="Target: Elasticsearch 8.x clusters").grid(row=4, column=0, sticky=tk.W, pady=(10, 5))
-        version_note = ttk.Label(conn_frame, text="(Enhanced with detailed sub-feature permission analysis)", font=('TkDefaultFont', 8))
-        version_note.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        self.local_auth_frame = ttk.Frame(self.conn_frame)
+        self.local_auth_frame.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(0,10))
+        ttk.Radiobutton(self.local_auth_frame, text="None", variable=self.local_auth_type_var, value="none", command=self._toggle_local_auth_fields).pack(side=tk.LEFT)
+        ttk.Radiobutton(self.local_auth_frame, text="API Key", variable=self.local_auth_type_var, value="api_key", command=self._toggle_local_auth_fields).pack(side=tk.LEFT, padx=(10,0))
+        ttk.Radiobutton(self.local_auth_frame, text="Basic Auth", variable=self.local_auth_type_var, value="basic_auth", command=self._toggle_local_auth_fields).pack(side=tk.LEFT, padx=(10,0))
+
+        # Local API Key (reuses self.api_key_var)
+        self.local_api_key_label = ttk.Label(self.conn_frame, text="API Key (id:secret or base64):")
+        self.local_api_key_label.grid(row=5, column=0, sticky=tk.W, pady=(0, 5))
+        self.local_api_key_entry = ttk.Entry(self.conn_frame, textvariable=self.api_key_var, width=60, show="*") # Reuses api_key_var
+        self.local_api_key_entry.grid(row=6, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        # Local Basic Auth (Username/Password)
+        self.local_basic_auth_frame = ttk.Frame(self.conn_frame)
+        self.local_basic_auth_frame.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0,10)) # Spans 2 columns
         
-        # Connect button
-        self.connect_btn = ttk.Button(conn_frame, text="Connect", command=self.connect_to_elastic)
-        self.connect_btn.grid(row=6, column=0, sticky=tk.W)
+        ttk.Label(self.local_basic_auth_frame, text="Username:").grid(row=0, column=0, sticky=tk.W, pady=(0,5))
+        local_username_entry = ttk.Entry(self.local_basic_auth_frame, textvariable=self.local_username_var, width=28)
+        local_username_entry.grid(row=0, column=1, sticky=tk.W, pady=(0,5), padx=(0,10))
         
-        # Status label
+        ttk.Label(self.local_basic_auth_frame, text="Password:").grid(row=0, column=2, sticky=tk.W, pady=(0,5))
+        local_password_entry = ttk.Entry(self.local_basic_auth_frame, textvariable=self.local_password_var, width=28, show="*")
+        local_password_entry.grid(row=0, column=3, sticky=tk.W, pady=(0,5))
+        
+        # Common fields (ES Version, Connect Button, Status)
+        # Adjust row numbers for these common fields
+        current_row = 7 # Next available row after local auth specific fields
+        
+        ttk.Label(self.conn_frame, text="Target: Elasticsearch 8.x clusters").grid(row=current_row, column=0, sticky=tk.W, pady=(10, 5))
+        current_row += 1
+        version_note = ttk.Label(self.conn_frame, text="(Enhanced with detailed sub-feature permission analysis)", font=('TkDefaultFont', 8))
+        version_note.grid(row=current_row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
+        current_row += 1
+        
+        self.connect_btn = ttk.Button(self.conn_frame, text="Connect", command=self.connect_to_elastic)
+        self.connect_btn.grid(row=current_row, column=0, sticky=tk.W)
+        
         self.status_var = tk.StringVar(value="Not connected")
-        self.status_label = ttk.Label(conn_frame, textvariable=self.status_var)
-        self.status_label.grid(row=6, column=1, sticky=tk.E)
+        self.status_label = ttk.Label(self.conn_frame, textvariable=self.status_var)
+        self.status_label.grid(row=current_row, column=1, sticky=tk.E) # Ensure it's in the second column of conn_frame
         
+        # Initial toggle
+        self._toggle_connection_fields()
+
         # Actions frame
         actions_frame = ttk.LabelFrame(main_frame, text="Actions", padding="10")
         actions_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
@@ -361,36 +501,65 @@ class KibanaMapperGUI:
         results_frame.rowconfigure(0, weight=1)
         text_frame.columnconfigure(0, weight=1)
         text_frame.rowconfigure(0, weight=1)
-        conn_frame.columnconfigure(0, weight=1)
+        self.conn_frame.columnconfigure(1, weight=1) # Allow status label to expand if needed
         
     def connect_to_elastic(self):
-        """Connect to Elastic Cloud"""
-        cloud_id = self.cloud_id_var.get().strip()
-        api_key = self.api_key_var.get().strip()
+        """Connect to Elastic Cloud or Local Instance"""
+        connection_type = self.connection_type_var.get()
+        params = {'type': connection_type}
         
-        if not cloud_id or not api_key:
-            messagebox.showerror("Error", "Please enter both Cloud ID and API Key")
-            return
-        
-        def connect_thread():
-            try:
-                self.status_var.set("Connecting...")
-                self.connect_btn.config(state=tk.DISABLED)
+        try:
+            if connection_type == "cloud":
+                params['cloud_id'] = self.cloud_id_var.get().strip()
+                params['api_key'] = self.api_key_var.get().strip()
+                if not params['cloud_id'] or not params['api_key']:
+                    messagebox.showerror("Error", "Please enter both Cloud ID and API Key for Elastic Cloud.")
+                    return
+            elif connection_type == "local":
+                hosts_str = self.local_hosts_var.get().strip()
+                if not hosts_str:
+                    messagebox.showerror("Error", "Please enter Host(s) for local connection.")
+                    return
+                params['hosts'] = [h.strip() for h in hosts_str.split(',')]
                 
-                self.mapper.connect(cloud_id, api_key)
-                
-                self.status_var.set("Connected successfully")
-                self.fetch_btn.config(state=tk.NORMAL)
-                self.results_text.insert(tk.END, "✅ Connected to Elasticsearch 8.x cluster successfully\n")
-                
-            except Exception as e:
-                self.status_var.set("Connection failed")
-                messagebox.showerror("Connection Error", str(e))
-                
-            finally:
-                self.connect_btn.config(state=tk.NORMAL)
-        
-        threading.Thread(target=connect_thread, daemon=True).start()
+                params['auth_type'] = self.local_auth_type_var.get()
+                if params['auth_type'] == "api_key":
+                    params['api_key'] = self.api_key_var.get().strip() # Reuses api_key_var
+                    if not params['api_key']:
+                        messagebox.showerror("Error", "Please enter API Key for local connection.")
+                        return
+                elif params['auth_type'] == "basic_auth":
+                    params['username'] = self.local_username_var.get().strip()
+                    params['password'] = self.local_password_var.get().strip() # Password can be empty
+                    if not params['username']:
+                        messagebox.showerror("Error", "Please enter Username for basic authentication.")
+                        return
+            else:
+                messagebox.showerror("Error", "Invalid connection type selected.")
+                return
+
+            def connect_thread():
+                try:
+                    self.status_var.set("Connecting...")
+                    self.connect_btn.config(state=tk.DISABLED)
+                    
+                    self.mapper.connect(params) # Pass the dictionary
+                    
+                    self.status_var.set(f"Connected successfully ({connection_type.capitalize()})")
+                    self.fetch_btn.config(state=tk.NORMAL)
+                    self.results_text.insert(tk.END, f"✅ Connected to Elasticsearch ({connection_type.capitalize()}) successfully\n")
+                    
+                except Exception as e:
+                    self.status_var.set("Connection failed")
+                    messagebox.showerror("Connection Error", str(e))
+                    
+                finally:
+                    self.connect_btn.config(state=tk.NORMAL)
+            
+            threading.Thread(target=connect_thread, daemon=True).start()
+
+        except Exception as e: # Catch any pre-thread errors (e.g., validation)
+             messagebox.showerror("Configuration Error", str(e))
     
     def fetch_data(self):
         """Fetch role and mapping data"""
