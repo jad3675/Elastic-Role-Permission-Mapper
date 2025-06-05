@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Kibana Role Permission Mapper
-A GUI tool to analyze and visualize Elastic Cloud Kibana permissions
+Enhanced Kibana Role Permission Mapper
+A GUI tool to analyze and visualize Elastic Cloud Kibana permissions with detailed sub-feature breakdown
 """
 
 import tkinter as tk
@@ -13,6 +13,7 @@ import os
 from datetime import datetime
 from typing import Dict, List, Any
 import threading
+import re
 
 try:
     from elasticsearch import Elasticsearch
@@ -92,8 +93,93 @@ class KibanaRoleMapper:
         except Exception as e:
             raise Exception(f"Failed to fetch data: {str(e)}")
     
+    def parse_detailed_privileges(self, privileges: List[str]) -> Dict:
+        """Parse privileges into detailed structure with sub-features"""
+        detailed_perms = {}
+        raw_privileges = list(privileges)  # Store raw privileges
+        
+        # Kibana features to check
+        kibana_features = [
+            'discover', 'dashboard', 'visualize', 'canvas', 'maps',
+            'ml', 'apm', 'uptime', 'logs', 'infrastructure',
+            'siem', 'dev_tools', 'advancedSettings', 'indexPatterns',
+            'savedObjectsManagement', 'graph', 'monitoring', 'fleet',
+            'osquery', 'security', 'alerts', 'cases', 'enterpriseSearch'
+        ]
+        
+        # Initialize feature structure
+        for feature in kibana_features:
+            detailed_perms[feature] = {
+                'level': 'NONE',
+                'privileges': [],
+                'sub_features': {}
+            }
+        
+        # Global privileges
+        global_privs = []
+        other_privs = []
+        
+        # Parse each privilege
+        for priv in privileges:
+            if priv in ['all', 'read']:
+                global_privs.append(priv)
+                # Global 'all' grants admin to all features
+                if priv == 'all':
+                    for feature in kibana_features:
+                        detailed_perms[feature]['level'] = 'ADMIN'
+                        detailed_perms[feature]['privileges'].append(priv)
+                # Global 'read' grants read to all features
+                elif priv == 'read':
+                    for feature in kibana_features:
+                        if detailed_perms[feature]['level'] == 'NONE':
+                            detailed_perms[feature]['level'] = 'READ'
+                            detailed_perms[feature]['privileges'].append(priv)
+            
+            # Feature-specific privileges
+            elif priv.startswith('feature_'):
+                # Parse feature privilege pattern: feature_<name>.<level>
+                match = re.match(r'feature_([^.]+)\.(.+)', priv)
+                if match:
+                    feature_name = match.group(1)
+                    perm_level = match.group(2)
+                    
+                    if feature_name in detailed_perms:
+                        detailed_perms[feature_name]['privileges'].append(priv)
+                        
+                        # Determine permission level
+                        if perm_level == 'all':
+                            detailed_perms[feature_name]['level'] = 'ADMIN'
+                        elif perm_level == 'read':
+                            if detailed_perms[feature_name]['level'] == 'NONE':
+                                detailed_perms[feature_name]['level'] = 'READ'
+                        elif perm_level.startswith('minimal_'):
+                            # Minimal permissions with sub-features
+                            minimal_level = perm_level.replace('minimal_', '')
+                            if minimal_level == 'all':
+                                detailed_perms[feature_name]['level'] = 'WRITE'
+                            elif minimal_level == 'read':
+                                if detailed_perms[feature_name]['level'] == 'NONE':
+                                    detailed_perms[feature_name]['level'] = 'READ'
+                            detailed_perms[feature_name]['sub_features']['minimal'] = minimal_level
+                        else:
+                            # Individual sub-feature permissions
+                            detailed_perms[feature_name]['sub_features'][perm_level] = 'granted'
+                            if detailed_perms[feature_name]['level'] == 'NONE':
+                                detailed_perms[feature_name]['level'] = 'CUSTOM'
+                    else:
+                        other_privs.append(priv)
+            else:
+                other_privs.append(priv)
+        
+        return {
+            'features': detailed_perms,
+            'global_privileges': global_privs,
+            'other_privileges': other_privs,
+            'raw_privileges': raw_privileges
+        }
+    
     def analyze_permissions(self, data: Dict) -> Dict:
-        """Analyze role permissions and create structured output"""
+        """Analyze role permissions and create structured output with detailed sub-features"""
         roles = data['roles']
         mappings = data['mappings']
         
@@ -102,7 +188,8 @@ class KibanaRoleMapper:
             'discover', 'dashboard', 'visualize', 'canvas', 'maps',
             'ml', 'apm', 'uptime', 'logs', 'infrastructure',
             'siem', 'dev_tools', 'advancedSettings', 'indexPatterns',
-            'savedObjectsManagement'
+            'savedObjectsManagement', 'graph', 'monitoring', 'fleet',
+            'osquery', 'security', 'alerts', 'cases', 'enterpriseSearch'
         ]
         
         # Analyze each role
@@ -110,6 +197,7 @@ class KibanaRoleMapper:
         for role_name, role_data in roles.items():
             analysis = {
                 'kibana_permissions': {},
+                'detailed_permissions': {},
                 'elasticsearch_permissions': {},
                 'spaces': []
             }
@@ -123,18 +211,25 @@ class KibanaRoleMapper:
                     
                     analysis['spaces'] = spaces
                     
-                    # Determine permission level for each feature
+                    # Parse detailed privileges
+                    detailed_perms = self.parse_detailed_privileges(privileges)
+                    analysis['detailed_permissions'] = detailed_perms
+                    
+                    # Store space-specific permissions
+                    analysis['space_permissions'] = {}
+                    for space in spaces:
+                        space_name = space if space != '*' else 'Default'
+                        analysis['space_permissions'][space_name] = {}
+                        
+                        # Use detailed permissions for each space
+                        for feature in kibana_features:
+                            feature_data = detailed_perms['features'].get(feature, {})
+                            analysis['space_permissions'][space_name][feature] = feature_data.get('level', 'NONE')
+                    
+                    # Also maintain the global view for compatibility
                     for feature in kibana_features:
-                        if 'all' in privileges:
-                            analysis['kibana_permissions'][feature] = 'ADMIN'
-                        elif f'feature_{feature}.all' in privileges:
-                            analysis['kibana_permissions'][feature] = 'WRITE'
-                        elif f'feature_{feature}.read' in privileges:
-                            analysis['kibana_permissions'][feature] = 'READ'
-                        elif 'read' in privileges:
-                            analysis['kibana_permissions'][feature] = 'READ'
-                        else:
-                            analysis['kibana_permissions'][feature] = 'NONE'
+                        feature_data = detailed_perms['features'].get(feature, {})
+                        analysis['kibana_permissions'][feature] = feature_data.get('level', 'NONE')
             
             # Check Elasticsearch cluster/index privileges
             cluster_privs = role_data.get('cluster', [])
@@ -173,7 +268,7 @@ class KibanaRoleMapper:
 class KibanaMapperGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Kibana Role Permission Mapper")
+        self.root.title("Enhanced Kibana Role Permission Mapper")
         self.root.geometry("800x600")
         
         self.mapper = KibanaRoleMapper()
@@ -206,7 +301,7 @@ class KibanaMapperGUI:
         
         # Elasticsearch Version Selection
         ttk.Label(conn_frame, text="Target: Elasticsearch 8.x clusters").grid(row=4, column=0, sticky=tk.W, pady=(10, 5))
-        version_note = ttk.Label(conn_frame, text="(Optimized for ES 8.x with elasticsearch client 8.x)", font=('TkDefaultFont', 8))
+        version_note = ttk.Label(conn_frame, text="(Enhanced with detailed sub-feature permission analysis)", font=('TkDefaultFont', 8))
         version_note.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
         
         # Connect button
@@ -301,7 +396,7 @@ class KibanaMapperGUI:
         """Fetch role and mapping data"""
         def fetch_thread():
             try:
-                self.results_text.insert(tk.END, "\n🔄 Fetching role data...\n")
+                self.results_text.insert(tk.END, "\n🔄 Fetching role data with detailed permission analysis...\n")
                 self.fetch_btn.config(state=tk.DISABLED)
                 
                 self.data = self.mapper.fetch_data()
@@ -310,10 +405,12 @@ class KibanaMapperGUI:
                 # Display summary
                 stats = self.analysis['stats']
                 summary = f"""
-📊 Data Summary:
+📊 Enhanced Data Summary:
 • Total Roles: {stats['total_roles']}
 • SAML Mappings: {stats['total_mappings']}
 • Kibana Features: {stats['total_features']}
+
+✨ Enhancement: Now includes detailed sub-feature permissions!
 
 Roles found:
 """
@@ -354,7 +451,7 @@ Roles found:
             
             # Open in browser
             webbrowser.open(f'file://{temp_path}')
-            self.results_text.insert(tk.END, "\n📄 HTML report opened in browser\n")
+            self.results_text.insert(tk.END, "\n📄 Enhanced HTML report with detailed permissions opened in browser\n")
             
         except Exception as e:
             messagebox.showerror("Report Error", f"Failed to generate report: {str(e)}")
@@ -373,7 +470,7 @@ Roles found:
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".html",
                 filetypes=[("HTML files", "*.html"), ("All files", "*.*")],
-                title="Save Kibana Permission Report"
+                title="Save Enhanced Kibana Permission Report"
             )
             
             if file_path:
@@ -383,8 +480,8 @@ Roles found:
                     
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(html_content)
-                messagebox.showinfo("Success", f"Report saved to {file_path}")
-                self.results_text.insert(tk.END, f"\n📄 HTML report saved to {file_path}\n")
+                messagebox.showinfo("Success", f"Enhanced report saved to {file_path}")
+                self.results_text.insert(tk.END, f"\n📄 Enhanced HTML report saved to {file_path}\n")
                 
         except Exception as e:
             messagebox.showerror("Report Error", f"Failed to generate report: {str(e)}")
@@ -399,7 +496,7 @@ Roles found:
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".csv",
                 filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-                title="Export Kibana Permissions to CSV"
+                title="Export Enhanced Kibana Permissions to CSV"
             )
             
             if file_path:
@@ -408,25 +505,24 @@ Roles found:
                     file_path += '.csv'
                     
                 self.create_csv_export(file_path)
-                messagebox.showinfo("Success", f"CSV exported to {file_path}")
-                self.results_text.insert(tk.END, f"\n📊 CSV exported to {file_path}\n")
+                messagebox.showinfo("Success", f"Enhanced CSV exported to {file_path}")
+                self.results_text.insert(tk.END, f"\n📊 Enhanced CSV exported to {file_path}\n")
                 
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export CSV: {str(e)}")
     
     def create_html_report(self) -> str:
-        """Create HTML report content"""
+        """Create enhanced HTML report content with detailed sub-feature permissions"""
         roles = self.analysis['roles']
         mappings = self.analysis['saml_mappings']
         features = self.analysis['kibana_features']
         stats = self.analysis['stats']
         cluster_info = self.data['cluster_info']
         
-        # Create permission matrix table
+        # Create permission matrix table (existing functionality)
         matrix_rows = ""
         for role_name, role_data in roles.items():
             perms = role_data['kibana_permissions']
-            # Escape any special characters in role name
             safe_role_name = str(role_name).replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
             row = f"<tr><td><strong>{safe_role_name}</strong></td>"
             
@@ -438,14 +534,117 @@ Roles found:
             row += "</tr>"
             matrix_rows += row
         
-        # Create SAML mapping cards
+        # Create detailed permissions section (NEW)
+        detailed_perms_html = ""
+        for role_name, role_data in roles.items():
+            detailed_perms = role_data.get('detailed_permissions', {})
+            if detailed_perms:
+                safe_role_name = str(role_name).replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
+                
+                # Global privileges
+                global_privs = detailed_perms.get('global_privileges', [])
+                global_badges = ""
+                for priv in global_privs:
+                    global_badges += f'<span class="global-privilege">{priv}</span> '
+                
+                # Raw privileges for advanced users
+                raw_privs = detailed_perms.get('raw_privileges', [])
+                raw_priv_count = len(raw_privs)
+                
+                # Feature breakdown
+                feature_breakdown = ""
+                features_data = detailed_perms.get('features', {})
+                for feature, feature_data in features_data.items():
+                    if feature_data.get('level', 'NONE') != 'NONE':
+                        level = feature_data['level']
+                        privileges = feature_data.get('privileges', [])
+                        sub_features = feature_data.get('sub_features', {})
+                        
+                        # Create feature card
+                        feature_display = feature.replace('_', ' ').title()
+                        level_class = level.lower()
+                        
+                        # Sub-features display
+                        sub_feature_html = ""
+                        if sub_features:
+                            sub_feature_html = '<div class="sub-features">'
+                            for sub_feat, sub_val in sub_features.items():
+                                if sub_feat == 'minimal':
+                                    sub_feature_html += f'<span class="sub-feature minimal">Minimal: {sub_val}</span>'
+                                else:
+                                    sub_feature_html += f'<span class="sub-feature">{sub_feat}: {sub_val}</span>'
+                            sub_feature_html += '</div>'
+                        
+                        # Raw privileges for this feature
+                        raw_priv_html = ""
+                        if privileges:
+                            raw_priv_html = f'<div class="raw-privileges" style="display: none;" id="raw-{safe_role_name}-{feature}">'
+                            for priv in privileges:
+                                raw_priv_html += f'<code class="privilege-code">{priv}</code>'
+                            raw_priv_html += '</div>'
+                        
+                        feature_breakdown += f'''
+                        <div class="detailed-feature-card">
+                            <div class="feature-header">
+                                <span class="feature-name">{feature_display}</span>
+                                <span class="feature-level {level_class}">{level}</span>
+                                {f'<button class="show-raw" onclick="toggleRawPrivileges(\'{safe_role_name}-{feature}\')">Show Raw</button>' if privileges else ''}
+                            </div>
+                            {sub_feature_html}
+                            {raw_priv_html}
+                        </div>
+                        '''
+                
+                # Other privileges (non-feature)
+                other_privs = detailed_perms.get('other_privileges', [])
+                other_badges = ""
+                for priv in other_privs:
+                    other_badges += f'<span class="other-privilege">{priv}</span> '
+                
+                detailed_perms_html += f'''
+                <div class="detailed-role-card">
+                    <div class="role-header">
+                        <h4>{safe_role_name}</h4>
+                        <div class="privilege-summary">
+                            <span class="priv-count">{raw_priv_count} total privileges</span>
+                            <button class="expand-details" onclick="toggleRoleDetails('{safe_role_name}')">
+                                <span id="toggle-text-{safe_role_name}">▼ Show Details</span>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="role-details" id="details-{safe_role_name}" style="display: none;">
+                        {f'<div class="global-section"><strong>Global Privileges:</strong> {global_badges}</div>' if global_badges else ''}
+                        
+                        <div class="features-section">
+                            <strong>Feature Permissions:</strong>
+                            <div class="feature-grid">
+                                {feature_breakdown if feature_breakdown else '<span class="no-features">No feature-specific permissions</span>'}
+                            </div>
+                        </div>
+                        
+                        {f'<div class="other-section"><strong>Other Privileges:</strong> {other_badges}</div>' if other_badges else ''}
+                        
+                        <div class="raw-section">
+                            <strong>All Raw Privileges:</strong>
+                            <button class="show-all-raw" onclick="toggleAllRawPrivileges('{safe_role_name}')">
+                                <span id="raw-toggle-{safe_role_name}">Show All</span>
+                            </button>
+                            <div class="all-raw-privileges" id="all-raw-{safe_role_name}" style="display: none;">
+                                {' '.join([f'<code class="privilege-code">{priv}</code>' for priv in raw_privs])}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                '''
+        
+        # Create SAML mapping cards (existing functionality)
         mapping_cards = ""
         for mapping_name, mapping_data in mappings.items():
             if mapping_data.get('enabled', True):
                 rules = mapping_data.get('rules', {})
                 assigned_roles = mapping_data.get('roles', [])
                 
-                # Escape mapping name
                 safe_mapping_name = str(mapping_name).replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
                 
                 # Extract SAML groups from rules (simplified)
@@ -477,7 +676,7 @@ Roles found:
                 """
                 mapping_cards += card
         
-        # Create role distribution analysis
+        # Create role distribution analysis (existing functionality)
         role_types = {
             'admin': 0,
             'editor': 0,
@@ -519,7 +718,7 @@ Roles found:
         else:
             role_distribution = "<p>No role data available</p>"
         
-        # Create Elasticsearch cluster privileges section
+        # Create Elasticsearch cluster privileges section (existing functionality)
         es_privileges_html = ""
         for role_name, role_data in roles.items():
             es_perms = role_data['elasticsearch_permissions']
@@ -617,6 +816,9 @@ Roles found:
                 </div>
                 '''
         
+        # Create space permission cards - FIXED VERSION
+        space_cards_html = '<div class="no-spaces">Select a role above to see space-specific permissions</div>'
+        
         # Feature headers for matrix
         feature_headers = ''.join([f'<th>{str(feature).title()}</th>' for feature in features])
         
@@ -658,6 +860,41 @@ Roles found:
         .tab-content {{ display: none; padding: 25px; }}
         .tab-content.active {{ display: block; }}
         
+        /* Detailed Permissions Styles (NEW) */
+        .detailed-role-card {{ background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; margin: 15px 0; transition: all 0.3s ease; }}
+        .detailed-role-card.filtered-out {{ display: none; }}
+        .role-header {{ background: #fff; padding: 20px; border-radius: 8px 8px 0 0; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }}
+        .role-header h4 {{ margin: 0; color: #2c3e50; font-size: 1.2em; }}
+        .privilege-summary {{ display: flex; align-items: center; gap: 15px; }}
+        .priv-count {{ background: #17a2b8; color: white; padding: 4px 8px; border-radius: 12px; font-size: 0.8em; }}
+        .expand-details {{ background: #6c757d; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-size: 0.9em; }}
+        .expand-details:hover {{ background: #495057; }}
+        .role-details {{ padding: 20px; }}
+        .global-section, .features-section, .other-section, .raw-section {{ margin: 15px 0; }}
+        .global-privilege {{ background: #dc3545; color: white; padding: 3px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; display: inline-block; }}
+        .other-privilege {{ background: #6f42c1; color: white; padding: 3px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; display: inline-block; }}
+        .feature-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-top: 10px; }}
+        .detailed-feature-card {{ background: white; border: 1px solid #dee2e6; border-radius: 6px; padding: 15px; }}
+        .feature-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }}
+        .feature-name {{ font-weight: 600; color: #2c3e50; }}
+        .feature-level {{ padding: 3px 8px; border-radius: 12px; font-size: 0.8em; font-weight: bold; }}
+        .feature-level.admin {{ background-color: #f8d7da; color: #721c24; }}
+        .feature-level.write {{ background-color: #cce5ff; color: #004085; }}
+        .feature-level.read {{ background-color: #d4edda; color: #155724; }}
+        .feature-level.custom {{ background-color: #fff3cd; color: #856404; }}
+        .show-raw {{ background: #28a745; color: white; border: none; padding: 3px 8px; border-radius: 3px; font-size: 0.7em; cursor: pointer; }}
+        .show-raw:hover {{ background: #218838; }}
+        .sub-features {{ margin-top: 8px; }}
+        .sub-feature {{ background: #e9ecef; padding: 2px 6px; border-radius: 8px; font-size: 0.75em; margin: 2px; display: inline-block; color: #495057; }}
+        .sub-feature.minimal {{ background: #fff3cd; color: #856404; }}
+        .raw-privileges {{ margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 4px; border-left: 3px solid #17a2b8; }}
+        .privilege-code {{ background: #e9ecef; padding: 2px 6px; border-radius: 3px; font-family: monospace; font-size: 0.8em; margin: 2px; display: inline-block; }}
+        .show-all-raw {{ background: #17a2b8; color: white; border: none; padding: 5px 10px; border-radius: 3px; font-size: 0.8em; cursor: pointer; margin: 5px 0; }}
+        .show-all-raw:hover {{ background: #138496; }}
+        .all-raw-privileges {{ margin-top: 10px; padding: 10px; background: #f1f3f4; border-radius: 4px; max-height: 200px; overflow-y: auto; }}
+        .no-features {{ color: #6c757d; font-style: italic; }}
+        
+        /* Existing styles continue... */
         .section {{ background: white; border-radius: 10px; padding: 25px; margin-bottom: 30px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
         .section h2 {{ color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; margin-top: 0; }}
         .permission-matrix {{ overflow-x: auto; margin: 20px 0; }}
@@ -671,6 +908,7 @@ Roles found:
         .permission-read {{ background-color: #d4edda; color: #155724; font-weight: bold; }}
         .permission-write {{ background-color: #cce5ff; color: #004085; font-weight: bold; }}
         .permission-admin {{ background-color: #f8d7da; color: #721c24; font-weight: bold; }}
+        .permission-custom {{ background-color: #fff3cd; color: #856404; font-weight: bold; }}
         .permission-none {{ background-color: #f6f6f6; color: #6c757d; }}
         .saml-mapping {{ display: flex; flex-wrap: wrap; gap: 20px; margin: 20px 0; }}
         .mapping-card {{ flex: 1; min-width: 300px; background: #f8f9fa; border-left: 4px solid #3498db; padding: 20px; border-radius: 5px; transition: all 0.3s ease; }}
@@ -707,13 +945,28 @@ Roles found:
         .index-summary {{ cursor: pointer; color: #007bff; text-decoration: underline; }}
         .index-detail {{ background: #f8f9fa; padding: 10px; border-radius: 5px; margin-top: 10px; border-left: 3px solid #17a2b8; font-family: monospace; font-size: 0.85em; display: none; line-height: 1.4; }}
         .filter-info {{ background: #e3f2fd; padding: 10px; border-radius: 5px; margin-bottom: 20px; font-style: italic; color: #1976d2; }}
+        
+        /* Space Cards Styles */
+        .space-cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin: 20px 0; }}
+        .space-card {{ background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; transition: all 0.3s ease; }}
+        .space-card.filtered-out {{ display: none; }}
+        .space-card h4 {{ margin: 0 0 15px 0; color: #2c3e50; font-size: 1.1em; border-bottom: 2px solid #3498db; padding-bottom: 8px; }}
+        .space-features {{ display: flex; flex-direction: column; gap: 8px; }}
+        .feature-row {{ display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #e9ecef; }}
+        .feature-row:last-child {{ border-bottom: none; }}
+        .feature-name {{ font-weight: 500; color: #495057; text-transform: capitalize; }}
+        .feature-permission {{ padding: 3px 8px; border-radius: 12px; font-size: 0.8em; font-weight: bold; }}
+        .feature-permission.write {{ background-color: #cce5ff; color: #004085; }}
+        .feature-permission.read {{ background-color: #d4edda; color: #155724; }}
+        .feature-permission.none {{ background-color: #f6f6f6; color: #6c757d; }}
+        .no-spaces {{ color: #6c757d; font-style: italic; text-align: center; padding: 20px; }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🔐 Elastic Role Permission Report</h1>
-            <p>Cluster: {cluster_name} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p>Cluster: {cluster_name} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | ✨ With Detailed Sub-Feature Analysis</p>
         </div>
 
         <div class="stats">
@@ -744,15 +997,40 @@ Roles found:
 
         <div class="tab-container">
             <div class="tab-nav">
-                <button class="tab-btn active" onclick="switchTab('kibana-tab')">🎛️ Kibana Permissions</button>
+                <button class="tab-btn active" onclick="switchTab('detailed-tab')">🔬 Detailed Permissions</button>
+                <button class="tab-btn" onclick="switchTab('kibana-tab')">🎛️ Kibana Overview</button>
                 <button class="tab-btn" onclick="switchTab('cluster-tab')">⚙️ Cluster Privileges</button>
             </div>
             
-            <div id="kibana-tab" class="tab-content active">
+            <div id="detailed-tab" class="tab-content active">
+                <div id="filter-info-detailed" class="filter-info" style="display: none;">
+                    Showing detailed permissions for role: <strong id="filtered-role-name-detailed"></strong>
+                </div>
+                
+                <div class="section-content">
+                    <h2>🔬 Detailed Permission Analysis</h2>
+                    <p style="color: #7f8c8d; margin-bottom: 20px;">
+                        This section shows the granular breakdown of each role's permissions, including sub-features, 
+                        minimal permissions, and raw privilege strings from Elasticsearch.
+                    </p>
+                    <div class="detailed-permissions" id="detailed-permissions">
+                        {detailed_perms_html if detailed_perms_html else '<p>No detailed permission data available.</p>'}
+                    </div>
+                </div>
+            </div>
+            
+            <div id="kibana-tab" class="tab-content">
                 <div id="filter-info-kibana" class="filter-info" style="display: none;">
                     Showing permissions for role: <strong id="filtered-role-name-kibana"></strong>
                 </div>
                 
+                <div class="section-content">
+                    <h2>🏠 Space-Specific Permissions</h2>
+                    <div class="space-cards" id="space-cards">
+                        {space_cards_html}
+                    </div>
+                </div>
+
                 <div class="section-content">
                     <h2>📊 Role Permission Matrix</h2>
                     <div class="permission-matrix">
@@ -807,8 +1085,9 @@ Roles found:
     </div>
     
     <script>
-        // Role data for filtering
+        // Role data for filtering and space permissions
         const roleData = {json.dumps([role_name for role_name in roles.keys()])};
+        const roleSpaceData = {json.dumps({role_name: role_data.get('space_permissions', {}) for role_name, role_data in roles.items()})};
         let selectedRole = null;
         
         // Initialize role pills
@@ -873,17 +1152,103 @@ Roles found:
                 }}
             }});
             
+            // Filter detailed permission cards
+            document.querySelectorAll('.detailed-role-card').forEach(card => {{
+                const cardTitle = card.querySelector('.role-header h4');
+                if (cardTitle && cardTitle.textContent === roleName) {{
+                    card.classList.remove('filtered-out');
+                }} else {{
+                    card.classList.add('filtered-out');
+                }}
+            }});
+            
+            // Update space cards
+            updateSpaceCards(roleName);
+            
             // Show filter info
             document.getElementById('filter-info-kibana').style.display = 'block';
             document.getElementById('filter-info-cluster').style.display = 'block';
+            document.getElementById('filter-info-detailed').style.display = 'block';
             document.getElementById('filtered-role-name-kibana').textContent = roleName;
             document.getElementById('filtered-role-name-cluster').textContent = roleName;
+            document.getElementById('filtered-role-name-detailed').textContent = roleName;
             
             // Show clear button
             document.getElementById('clear-btn').style.display = 'inline-block';
             
             // Update filtered roles count
             document.getElementById('filtered-roles').textContent = '1';
+        }}
+        
+        // Update space cards based on selected role
+        function updateSpaceCards(roleName) {{
+            const spaceContainer = document.getElementById('space-cards');
+            
+            // Get role space data
+            const selectedRoleSpaces = roleSpaceData[roleName] || {{}};
+            
+            if (Object.keys(selectedRoleSpaces).length === 0) {{
+                // No space data available, show default message
+                spaceContainer.innerHTML = `
+                    <div class="space-card">
+                        <h4>🏠 Default Space</h4>
+                        <div class="space-features">
+                            <div class="feature-row">
+                                <span class="feature-name">Role: <strong>${{roleName}}</strong></span>
+                                <span class="feature-permission read">Global permissions apply to all spaces</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }} else {{
+                // Build space cards from actual data
+                let spaceCardsHtml = '';
+                for (const [spaceName, spaceFeatures] of Object.entries(selectedRoleSpaces)) {{
+                    let featureRows = '';
+                    let hasPermissions = false;
+                    
+                    for (const [feature, permission] of Object.entries(spaceFeatures)) {{
+                        if (permission !== 'NONE') {{
+                            hasPermissions = true;
+                            const featureDisplay = feature.replace(/_/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase());
+                            const permClass = permission.toLowerCase();
+                            featureRows += `
+                                <div class="feature-row">
+                                    <span class="feature-name">${{featureDisplay}}</span>
+                                    <span class="feature-permission ${{permClass}}">${{permission}}</span>
+                                </div>
+                            `;
+                        }}
+                    }}
+                    
+                    if (hasPermissions) {{
+                        spaceCardsHtml += `
+                            <div class="space-card">
+                                <h4>🏠 ${{spaceName}} Space</h4>
+                                <div class="space-features">
+                                    ${{featureRows}}
+                                </div>
+                            </div>
+                        `;
+                    }}
+                }}
+                
+                if (spaceCardsHtml) {{
+                    spaceContainer.innerHTML = spaceCardsHtml;
+                }} else {{
+                    spaceContainer.innerHTML = `
+                        <div class="space-card">
+                            <h4>🏠 Default Space</h4>
+                            <div class="space-features">
+                                <div class="feature-row">
+                                    <span class="feature-name">Role: <strong>${{roleName}}</strong></span>
+                                    <span class="feature-permission none">No specific space permissions defined</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }}
+            }}
         }}
         
         // Clear filter
@@ -904,6 +1269,7 @@ Roles found:
             // Hide filter info
             document.getElementById('filter-info-kibana').style.display = 'none';
             document.getElementById('filter-info-cluster').style.display = 'none';
+            document.getElementById('filter-info-detailed').style.display = 'none';
             
             // Hide clear button
             document.getElementById('clear-btn').style.display = 'none';
@@ -912,12 +1278,16 @@ Roles found:
             document.querySelector('.search-box').value = '';
             
             // Reset filtered roles count
-            document.getElementById('filtered-roles').textContent = '{stats["total_roles"]}';
+            document.getElementById('filtered-roles').textContent = roleData.length.toString();
             
             // Show all role pills
             document.querySelectorAll('.role-pill').forEach(pill => {{
                 pill.style.display = 'block';
             }});
+            
+            // Reset space cards
+            const spaceContainer = document.getElementById('space-cards');
+            spaceContainer.innerHTML = '<div class="no-spaces">Select a role above to see space-specific permissions</div>';
         }}
         
         // Search roles
@@ -950,6 +1320,44 @@ Roles found:
             
             // Activate clicked tab button
             event.target.classList.add('active');
+        }}
+        
+        // Toggle role details in detailed view
+        function toggleRoleDetails(roleName) {{
+            const detailsDiv = document.getElementById(`details-${{roleName}}`);
+            const toggleText = document.getElementById(`toggle-text-${{roleName}}`);
+            
+            if (detailsDiv.style.display === 'none') {{
+                detailsDiv.style.display = 'block';
+                toggleText.textContent = '▲ Hide Details';
+            }} else {{
+                detailsDiv.style.display = 'none';
+                toggleText.textContent = '▼ Show Details';
+            }}
+        }}
+        
+        // Toggle raw privileges display
+        function toggleRawPrivileges(elementId) {{
+            const element = document.getElementById(`raw-${{elementId}}`);
+            if (element.style.display === 'none') {{
+                element.style.display = 'block';
+            }} else {{
+                element.style.display = 'none';
+            }}
+        }}
+        
+        // Toggle all raw privileges for a role
+        function toggleAllRawPrivileges(roleName) {{
+            const element = document.getElementById(`all-raw-${{roleName}}`);
+            const toggleBtn = document.getElementById(`raw-toggle-${{roleName}}`);
+            
+            if (element.style.display === 'none') {{
+                element.style.display = 'block';
+                toggleBtn.textContent = 'Hide All';
+            }} else {{
+                element.style.display = 'none';
+                toggleBtn.textContent = 'Show All';
+            }}
         }}
         
         // Initialize on page load
@@ -991,7 +1399,7 @@ Roles found:
         return html_template
     
     def create_csv_export(self, file_path: str):
-        """Create CSV export of role permissions"""
+        """Create enhanced CSV export of role permissions with detailed breakdown"""
         import csv
         
         roles = self.analysis['roles']
@@ -1000,14 +1408,37 @@ Roles found:
         with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
             
-            # Header row
-            header = ['Role'] + features
+            # Enhanced header row with detailed columns
+            header = ['Role', 'Global_Privileges', 'Raw_Privilege_Count'] + [f'{feature}_Level' for feature in features] + [f'{feature}_Raw_Privileges' for feature in features]
             writer.writerow(header)
             
             # Data rows
             for role_name, role_data in roles.items():
                 perms = role_data['kibana_permissions']
-                row = [role_name] + [perms.get(feature, 'NONE') for feature in features]
+                detailed_perms = role_data.get('detailed_permissions', {})
+                
+                # Basic info
+                row = [role_name]
+                
+                # Global privileges
+                global_privs = detailed_perms.get('global_privileges', [])
+                row.append('; '.join(global_privs) if global_privs else 'None')
+                
+                # Raw privilege count
+                raw_privs = detailed_perms.get('raw_privileges', [])
+                row.append(len(raw_privs))
+                
+                # Feature levels
+                for feature in features:
+                    row.append(perms.get(feature, 'NONE'))
+                
+                # Feature raw privileges
+                features_data = detailed_perms.get('features', {})
+                for feature in features:
+                    feature_data = features_data.get(feature, {})
+                    feature_privs = feature_data.get('privileges', [])
+                    row.append('; '.join(feature_privs) if feature_privs else 'None')
+                
                 writer.writerow(row)
 
 def main():
