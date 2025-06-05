@@ -41,7 +41,7 @@ The Elastic Role Permission Mapper helps security administrators, DevOps teams, 
 - Elasticsearch client library (8.x recommended)
 
 ### Setup
-1. **Clone or download** the `_role_mapper.py` file
+1. **Clone or download** the `elastic_role_mapper.py` file
 
 2. **Install dependencies**:
    ```bash
@@ -55,7 +55,7 @@ The Elastic Role Permission Mapper helps security administrators, DevOps teams, 
 
 3. **Run the application**:
    ```bash
-   python _role_mapper.py
+   python elastic_role_mapper.py
    ```
 
 ## 🔧 Usage
