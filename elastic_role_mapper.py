@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced Kibana Role Permission Mapper
+Elastic Role Permission Mapper
 A GUI tool to analyze and visualize Elastic Cloud Kibana permissions with detailed sub-feature breakdown
 """
 
@@ -268,7 +268,7 @@ class KibanaRoleMapper:
 class KibanaMapperGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Enhanced Kibana Role Permission Mapper")
+        self.root.title("Elastic Role Permission Mapper")
         self.root.geometry("800x600")
         
         self.mapper = KibanaRoleMapper()
