@@ -231,7 +231,7 @@ The Elastic Role Permission Mapper (v4 Gold) helps security administrators, DevO
 - **Analysis Time**: Fetching and analyzing data from large clusters might take some time. The operations are threaded to keep the GUI responsive.
 - **Large Role/User Counts**: The GUI and reports are designed to handle a reasonable number of roles and users. Extremely large datasets might impact performance.
 
-## 🆕 What's New in v4 Gold (this version)
+## 🆕 What's New
 
 This version (`elastic_role_mapper.py`) introduces major enhancements:
 
