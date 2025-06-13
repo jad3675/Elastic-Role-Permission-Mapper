@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Elastic Role Permission Mapper
-A GUI tool to analyze and visualize Elastic Cloud Kibana permissions with detailed sub-feature breakdown and local users
+A GUI tool to analyze and visualize Elastic Cloud Kibana permissions with detailed sub-feature breakdown, local users, and space selection
 """
 
 import tkinter as tk
@@ -125,7 +125,7 @@ class KibanaRoleMapper:
                 users_response = self.es.security.get_user()
                 self.users_data = users_response
                 print(f"Fetched {len(self.users_data)} users from native realm")
-            except (ForbiddenError, NotFoundError) as user_error:
+            except (NotFoundError) as user_error:
                 print(f"Warning: Could not fetch users (may not have permission or native realm not enabled): {user_error}")
                 self.users_data = {}
             except Exception as user_error:
@@ -145,6 +145,23 @@ class KibanaRoleMapper:
             
         except Exception as e:
             raise Exception(f"Failed to fetch data: {str(e)}")
+    
+    def merge_permission_levels(self, current_level: str, new_level: str) -> str:
+        """Merge two permission levels, taking the higher one"""
+        level_hierarchy = {
+            'NONE': 0,
+            'CUSTOM': 1,
+            'READ': 2,
+            'WRITE': 3,
+            'ADMIN': 4
+        }
+        
+        current_rank = level_hierarchy.get(current_level, 0)
+        new_rank = level_hierarchy.get(new_level, 0)
+        
+        if new_rank > current_rank:
+            return new_level
+        return current_level
     
     def parse_detailed_privileges(self, privileges: List[str]) -> Dict:
         """Parse privileges into detailed structure with sub-features"""
@@ -305,7 +322,7 @@ class KibanaRoleMapper:
         return user_analysis
     
     def analyze_permissions(self, data: Dict) -> Dict:
-        """Analyze role permissions and create structured output with detailed sub-features and users"""
+        """Analyze role permissions and create structured output with detailed sub-features, users, and proper space handling"""
         roles = data['roles']
         mappings = data['mappings']
         users = data['users']
@@ -319,6 +336,9 @@ class KibanaRoleMapper:
             'osquery', 'security', 'alerts', 'cases', 'enterpriseSearch'
         ]
         
+        # Collect all unique spaces across all roles
+        all_spaces_global = set()
+        
         # Analyze each role
         role_analysis = {}
         for role_name, role_data in roles.items():
@@ -326,37 +346,73 @@ class KibanaRoleMapper:
                 'kibana_permissions': {},
                 'detailed_permissions': {},
                 'elasticsearch_permissions': {},
-                'spaces': []
+                'spaces': [],
+                'space_permissions': {},
+                'all_spaces': set()
             }
             
-            # Check Kibana application privileges
+            # Check Kibana application privileges - ENHANCED FOR PROPER SPACE HANDLING
             applications = role_data.get('applications', [])
+            
+            # Initialize space permissions tracking
+            space_permissions = {}
+            all_spaces_for_role = set()
+            
+            # Process each application entry separately
             for app in applications:
                 if app.get('application') == 'kibana-.kibana':
                     privileges = app.get('privileges', [])
                     spaces = app.get('resources', ['*'])
                     
-                    analysis['spaces'] = spaces
-                    
-                    # Parse detailed privileges
+                    # Parse detailed privileges for this application entry
                     detailed_perms = self.parse_detailed_privileges(privileges)
-                    analysis['detailed_permissions'] = detailed_perms
                     
-                    # Store space-specific permissions
-                    analysis['space_permissions'] = {}
+                    # Apply these privileges to each space in this application entry
                     for space in spaces:
-                        space_name = space if space != '*' else 'Default'
-                        analysis['space_permissions'][space_name] = {}
+                        space_name = space.replace('space:', '') if space != '*' else 'Default'
+                        all_spaces_for_role.add(space_name)
+                        all_spaces_global.add(space_name)
                         
-                        # Use detailed permissions for each space
+                        # Initialize space permissions if not exists
+                        if space_name not in space_permissions:
+                            space_permissions[space_name] = {}
+                            for feature in kibana_features:
+                                space_permissions[space_name][feature] = 'NONE'
+                        
+                        # Merge permissions for this space
                         for feature in kibana_features:
                             feature_data = detailed_perms['features'].get(feature, {})
-                            analysis['space_permissions'][space_name][feature] = feature_data.get('level', 'NONE')
+                            current_level = space_permissions[space_name][feature]
+                            new_level = feature_data.get('level', 'NONE')
+                            space_permissions[space_name][feature] = self.merge_permission_levels(current_level, new_level)
                     
-                    # Also maintain the global view for compatibility
-                    for feature in kibana_features:
-                        feature_data = detailed_perms['features'].get(feature, {})
-                        analysis['kibana_permissions'][feature] = feature_data.get('level', 'NONE')
+                    # Store the detailed permissions from the first (or most comprehensive) application entry
+                    if not analysis['detailed_permissions']:
+                        analysis['detailed_permissions'] = detailed_perms
+                    else:
+                        # Merge with existing detailed permissions
+                        existing_detailed = analysis['detailed_permissions']
+                        for feature in kibana_features:
+                            existing_level = existing_detailed['features'].get(feature, {}).get('level', 'NONE')
+                            new_level = detailed_perms['features'].get(feature, {}).get('level', 'NONE')
+                            merged_level = self.merge_permission_levels(existing_level, new_level)
+                            existing_detailed['features'][feature]['level'] = merged_level
+            
+            # Store space information
+            analysis['spaces'] = sorted(list(all_spaces_for_role))
+            analysis['all_spaces'] = all_spaces_for_role
+            analysis['space_permissions'] = space_permissions
+            
+            # Create global permissions view (highest permission across all spaces)
+            global_permissions = {}
+            for feature in kibana_features:
+                highest_level = 'NONE'
+                for space_name, space_perms in space_permissions.items():
+                    space_level = space_perms.get(feature, 'NONE')
+                    highest_level = self.merge_permission_levels(highest_level, space_level)
+                global_permissions[feature] = highest_level
+            
+            analysis['kibana_permissions'] = global_permissions
             
             # Check Elasticsearch cluster/index privileges
             cluster_privs = role_data.get('cluster', [])
@@ -389,11 +445,13 @@ class KibanaRoleMapper:
             'saml_mappings': saml_analysis,
             'users': user_analysis,
             'kibana_features': kibana_features,
+            'all_spaces': sorted(list(all_spaces_global)),  # NEW: All unique spaces
             'stats': {
                 'total_roles': len(roles),
                 'total_mappings': len(mappings),
                 'total_users': user_analysis['total_users'],
-                'total_features': len(kibana_features)
+                'total_features': len(kibana_features),
+                'total_spaces': len(all_spaces_global)  # NEW: Total unique spaces
             }
         }
 
@@ -532,7 +590,7 @@ class KibanaMapperGUI:
         
         ttk.Label(self.conn_frame, text="Target: Elasticsearch 8.x clusters").grid(row=current_row, column=0, sticky=tk.W, pady=(10, 5))
         current_row += 1
-        version_note = ttk.Label(self.conn_frame, text="(Enhanced with detailed sub-feature permission analysis + Local Users)", font=('TkDefaultFont', 8))
+        version_note = ttk.Label(self.conn_frame, text="(Enhanced with detailed sub-feature permission analysis + Local Users + Space Selection)", font=('TkDefaultFont', 8))
         version_note.grid(row=current_row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
         current_row += 1
         
@@ -658,7 +716,7 @@ class KibanaMapperGUI:
         """Fetch role, mapping, and user data"""
         def fetch_thread():
             try:
-                self.results_text.insert(tk.END, "\n🔄 Fetching roles, mappings, and local users with detailed analysis...\n")
+                self.results_text.insert(tk.END, "\n🔄 Fetching roles, mappings, and local users with detailed analysis and space handling...\n")
                 self.fetch_btn.config(state=tk.DISABLED)
                 
                 self.data = self.mapper.fetch_data()
@@ -667,19 +725,29 @@ class KibanaMapperGUI:
                 # Display summary
                 stats = self.analysis['stats']
                 user_info = self.analysis['users']
+                all_spaces = self.analysis.get('all_spaces', [])
+                
                 summary = f"""
 📊 Enhanced Data Summary:
 • Total Roles: {stats['total_roles']}
 • SAML Mappings: {stats['total_mappings']}
 • Local Users: {stats['total_users']} {'(Active: ' + str(user_info['active_users']) + ', Inactive: ' + str(user_info['inactive_users']) + ')' if user_info['available'] else '(Not available - check permissions)'}
 • Kibana Features: {stats['total_features']}
+• Kibana Spaces: {stats.get('total_spaces', 0)} ({', '.join(all_spaces[:5])}{'...' if len(all_spaces) > 5 else ''})
 
-✨ Enhancement: Now includes detailed sub-feature permissions + Local Users analysis!
+✨ Enhancement: Now includes detailed sub-feature permissions + Local Users analysis + Space Selection!
 
 Roles found:
 """
                 for role_name in self.analysis['roles'].keys():
                     summary += f"  • {role_name}\n"
+                
+                if all_spaces:
+                    summary += f"\nKibana Spaces found ({len(all_spaces)} total):\n"
+                    for space in all_spaces[:10]:  # Show first 10 spaces
+                        summary += f"  • {space}\n"
+                    if len(all_spaces) > 10:
+                        summary += f"  ... and {len(all_spaces) - 10} more spaces\n"
                 
                 if self.analysis['saml_mappings']:
                     summary += "\nSAML Mappings:\n"
@@ -729,7 +797,7 @@ Roles found:
             
             # Open in browser
             webbrowser.open(f'file://{temp_path}')
-            self.results_text.insert(tk.END, "\n📄 Enhanced HTML report with detailed permissions and local users opened in browser\n")
+            self.results_text.insert(tk.END, "\n📄 Enhanced HTML report with detailed permissions, local users, and space selection opened in browser\n")
             
         except Exception as e:
             messagebox.showerror("Report Error", f"Failed to generate report: {str(e)}")
@@ -748,7 +816,7 @@ Roles found:
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".html",
                 filetypes=[("HTML files", "*.html"), ("All files", "*.*")],
-                title="Save Enhanced Kibana Permission Report with Users"
+                title="Save Enhanced Kibana Permission Report with Users and Spaces"
             )
             
             if file_path:
@@ -758,8 +826,8 @@ Roles found:
                     
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(html_content)
-                messagebox.showinfo("Success", f"Enhanced report with users saved to {file_path}")
-                self.results_text.insert(tk.END, f"\n📄 Enhanced HTML report with users saved to {file_path}\n")
+                messagebox.showinfo("Success", f"Enhanced report with users and spaces saved to {file_path}")
+                self.results_text.insert(tk.END, f"\n📄 Enhanced HTML report with users and spaces saved to {file_path}\n")
                 
         except Exception as e:
             messagebox.showerror("Report Error", f"Failed to generate report: {str(e)}")
@@ -774,7 +842,7 @@ Roles found:
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".csv",
                 filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-                title="Export Enhanced Kibana Permissions and Users to CSV"
+                title="Export Enhanced Kibana Permissions, Users, and Spaces to CSV"
             )
             
             if file_path:
@@ -783,18 +851,19 @@ Roles found:
                     file_path += '.csv'
                     
                 self.create_csv_export(file_path)
-                messagebox.showinfo("Success", f"Enhanced CSV with users exported to {file_path}")
-                self.results_text.insert(tk.END, f"\n📊 Enhanced CSV with users exported to {file_path}\n")
+                messagebox.showinfo("Success", f"Enhanced CSV with users and spaces exported to {file_path}")
+                self.results_text.insert(tk.END, f"\n📊 Enhanced CSV with users and spaces exported to {file_path}\n")
                 
         except Exception as e:
             messagebox.showerror("Export Error", f"Failed to export CSV: {str(e)}")
     
     def create_html_report(self) -> str:
-        """Create enhanced HTML report content with detailed sub-feature permissions and local users"""
+        """Create enhanced HTML report content with detailed sub-feature permissions, local users, and space selection"""
         roles = self.analysis['roles']
         mappings = self.analysis['saml_mappings']
         users_analysis = self.analysis['users']
         features = self.analysis['kibana_features']
+        all_spaces = self.analysis.get('all_spaces', [])
         stats = self.analysis['stats']
         cluster_info = self.data['cluster_info']
         
@@ -813,7 +882,47 @@ Roles found:
             row += "</tr>"
             matrix_rows += row
         
-        # Create detailed permissions section (existing)
+        # Create space-specific permission matrix
+        space_matrix_html = ""
+        if all_spaces:
+            for space_name in all_spaces:
+                safe_space_name = str(space_name).replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
+                space_rows = ""
+                
+                for role_name, role_data in roles.items():
+                    space_perms = role_data.get('space_permissions', {}).get(space_name, {})
+                    if space_perms:  # Only show roles that have permissions in this space
+                        safe_role_name = str(role_name).replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
+                        row = f"<tr><td><strong>{safe_role_name}</strong></td>"
+                        
+                        for feature in features:
+                            perm_level = space_perms.get(feature, 'NONE')
+                            css_class = f"permission-{perm_level.lower()}"
+                            row += f'<td class="{css_class}">{perm_level}</td>'
+                        
+                        row += "</tr>"
+                        space_rows += row
+                
+                if space_rows:  # Only create matrix if there are permissions for this space
+                    feature_headers = ''.join([f'<th>{str(feature).title()}</th>' for feature in features])
+                    space_matrix_html += f'''
+                    <div class="space-matrix" id="space-matrix-{safe_space_name}" style="display: none;">
+                        <h4>🏠 Permissions in Space: {safe_space_name}</h4>
+                        <table class="matrix-table">
+                            <thead>
+                                <tr>
+                                    <th class="role-header">Role</th>
+                                    {feature_headers}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {space_rows}
+                            </tbody>
+                        </table>
+                    </div>
+                    '''
+        
+        # Create detailed permissions section (existing but enhanced)
         detailed_perms_html = ""
         for role_name, role_data in roles.items():
             detailed_perms = role_data.get('detailed_permissions', {})
@@ -829,6 +938,12 @@ Roles found:
                 # Raw privileges for advanced users
                 raw_privs = detailed_perms.get('raw_privileges', [])
                 raw_priv_count = len(raw_privs)
+                
+                # Space information
+                role_spaces = role_data.get('spaces', [])
+                space_info = ""
+                if role_spaces:
+                    space_info = f'<div class="space-info"><strong>Applies to spaces:</strong> {", ".join(role_spaces)}</div>'
                 
                 # Feature breakdown
                 feature_breakdown = ""
@@ -862,12 +977,14 @@ Roles found:
                                 raw_priv_html += f'<code class="privilege-code">{priv}</code>'
                             raw_priv_html += '</div>'
                         
+                        show_raw_btn = f'<button class="show-raw" onclick="toggleRawPrivileges(\'{safe_role_name}-{feature}\')">Show Raw</button>' if privileges else ''
+                        
                         feature_breakdown += f'''
                         <div class="detailed-feature-card">
                             <div class="feature-header">
                                 <span class="feature-name">{feature_display}</span>
                                 <span class="feature-level {level_class}">{level}</span>
-                                {f'<button class="show-raw" onclick="toggleRawPrivileges(\'{safe_role_name}-{feature}\')">Show Raw</button>' if privileges else ''}
+                                {show_raw_btn}
                             </div>
                             {sub_feature_html}
                             {raw_priv_html}
@@ -879,6 +996,11 @@ Roles found:
                 other_badges = ""
                 for priv in other_privs:
                     other_badges += f'<span class="other-privilege">{priv}</span> '
+                
+                # Create content variables for this role
+                feature_breakdown_content = feature_breakdown if feature_breakdown else '<span class="no-features">No feature-specific permissions</span>'
+                global_section = f'<div class="global-section"><strong>Global Privileges:</strong> {global_badges}</div>' if global_badges else ''
+                other_section = f'<div class="other-section"><strong>Other Privileges:</strong> {other_badges}</div>' if other_badges else ''
                 
                 detailed_perms_html += f'''
                 <div class="detailed-role-card">
@@ -893,16 +1015,17 @@ Roles found:
                     </div>
                     
                     <div class="role-details" id="details-{safe_role_name}" style="display: none;">
-                        {f'<div class="global-section"><strong>Global Privileges:</strong> {global_badges}</div>' if global_badges else ''}
+                        {space_info}
+                        {global_section}
                         
                         <div class="features-section">
                             <strong>Feature Permissions:</strong>
                             <div class="feature-grid">
-                                {feature_breakdown if feature_breakdown else '<span class="no-features">No feature-specific permissions</span>'}
+                                {feature_breakdown_content}
                             </div>
                         </div>
                         
-                        {f'<div class="other-section"><strong>Other Privileges:</strong> {other_badges}</div>' if other_badges else ''}
+                        {other_section}
                         
                         <div class="raw-section">
                             <strong>All Raw Privileges:</strong>
@@ -910,14 +1033,14 @@ Roles found:
                                 <span id="raw-toggle-{safe_role_name}">Show All</span>
                             </button>
                             <div class="all-raw-privileges" id="all-raw-{safe_role_name}" style="display: none;">
-                                {' '.join([f'<code class="privilege-code">{priv}</code>' for priv in raw_privs])}
+                                {''.join([f'<code class="privilege-code">{priv}</code>' for priv in raw_privs])}
                             </div>
                         </div>
                     </div>
                 </div>
                 '''
         
-        # Create local users section (NEW)
+        # Create local users section (existing)
         users_html = ""
         user_role_matrix_html = ""
         user_stats_html = ""
@@ -935,22 +1058,26 @@ Roles found:
             user_stats_html = f'''
             <div class="user-stats">
                 <div class="user-stat-cards">
-                    <div class="user-stat-card active">
+                    <div class="user-stat-card active clickable" onclick="filterUsersByCategory('active')" data-category="active">
                         <div class="stat-number">{active_users}</div>
                         <div class="stat-label">Active Users</div>
                     </div>
-                    <div class="user-stat-card inactive">
+                    <div class="user-stat-card inactive clickable" onclick="filterUsersByCategory('inactive')" data-category="inactive">
                         <div class="stat-number">{inactive_users}</div>
                         <div class="stat-label">Inactive Users</div>
                     </div>
-                    <div class="user-stat-card no-roles">
+                    <div class="user-stat-card no-roles clickable" onclick="filterUsersByCategory('no-roles')" data-category="no-roles">
                         <div class="stat-number">{users_by_role_count.get(0, 0)}</div>
                         <div class="stat-label">Users Without Roles</div>
                     </div>
-                    <div class="user-stat-card multiple-roles">
+                    <div class="user-stat-card multiple-roles clickable" onclick="filterUsersByCategory('multiple-roles')" data-category="multiple-roles">
                         <div class="stat-number">{users_by_role_count.get('multiple', 0)}</div>
                         <div class="stat-label">Users with Multiple Roles</div>
                     </div>
+                </div>
+                <div id="user-filter-info" class="filter-info" style="display: none; margin-top: 15px;">
+                    Showing: <strong id="user-filter-text"></strong>
+                    <button class="clear-filter" onclick="clearUserFilter()" style="margin-left: 10px;">Clear Filter</button>
                 </div>
             </div>
             '''
@@ -980,13 +1107,16 @@ Roles found:
                 status_class = "enabled" if enabled else "disabled"
                 status_text = "✅ Active" if enabled else "❌ Inactive"
                 
+                full_name_div = f'<div class="user-full-name">{safe_full_name}</div>' if safe_full_name else ''
+                email_div = f'<div class="user-email">{safe_email}</div>' if safe_email else ''
+                
                 users_html += f'''
                 <div class="user-card {status_class}">
                     <div class="user-header">
                         <div class="user-info">
                             <h4>{safe_username}</h4>
-                            {f'<div class="user-full-name">{safe_full_name}</div>' if safe_full_name else ''}
-                            {f'<div class="user-email">{safe_email}</div>' if safe_email else ''}
+                            {full_name_div}
+                            {email_div}
                         </div>
                         <div class="user-status">
                             <span class="status-badge {status_class}">{status_text}</span>
@@ -1093,16 +1223,18 @@ Roles found:
                     safe_role = str(role).replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
                     role_spans += f'<span class="role-badge">{safe_role}</span> '
 
-                card = f"""
+                group_spans_content = group_spans if group_spans else '<span class="saml-group">No groups configured</span>'
+                role_spans_content = role_spans if role_spans else '<span class="role-badge">No roles assigned</span>'
+
+                mapping_cards += f'''
                 <div class="mapping-card">
                     <h3>{safe_mapping_name}</h3>
                     <p><strong>SAML Groups:</strong></p>
-                    {group_spans if group_spans else '<span class="saml-group">No groups configured</span>'}
+                    {group_spans_content}
                     <p><strong>→ Assigned Roles:</strong></p>
-                    {role_spans if role_spans else '<span class="role-badge">No roles assigned</span>'}
+                    {role_spans_content}
                 </div>
-                """
-                mapping_cards += card
+                '''
         
         # Create role distribution analysis (existing functionality)
         role_types = {
@@ -1244,8 +1376,13 @@ Roles found:
                 </div>
                 '''
         
-        # Create space permission cards - FIXED VERSION
-        space_cards_html = '<div class="no-spaces">Select a role above to see space-specific permissions</div>'
+        # Create space selection pills
+        space_pills_html = ""
+        if all_spaces:
+            for space_name in all_spaces:
+                display_name = space_name.replace('space:', '') if space_name != 'Default' else space_name
+                safe_space_name = str(display_name).replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
+                space_pills_html += f'<div class="space-pill" onclick="filterBySpace(\'{space_name}\')" data-space="{space_name}">{safe_space_name}</div>'
         
         # Feature headers for matrix
         feature_headers = ''.join([f'<th>{str(feature).title()}</th>' for feature in features])
@@ -1253,12 +1390,28 @@ Roles found:
         # Safely get cluster name
         cluster_name = str(cluster_info.get('cluster_name', 'Unknown')).replace('<', '&lt;').replace('>', '&gt;').replace('&', '&amp;')
         
-        html_template = f"""<!DOCTYPE html>
+        # Generate JSON data for JavaScript
+        role_data_json = json.dumps([role_name for role_name in roles.keys()])
+        space_data_json = json.dumps(all_spaces)
+        role_space_data_json = json.dumps({role_name: role_data.get('space_permissions', {}) for role_name, role_data in roles.items()})
+        user_role_mapping_json = json.dumps(users_analysis.get('role_user_mapping', {})) if users_analysis['available'] else json.dumps({})
+        user_details_json = json.dumps(users_analysis.get('user_details', {})) if users_analysis['available'] else json.dumps({})
+        
+        # Generate conditional content
+        space_filter_html = f'<div class="space-filter"><div class="filter-header"><h3>🏠 Filter by Space</h3></div><div class="space-pills" id="space-pills">{space_pills_html}</div></div>' if all_spaces else ''
+        user_role_matrix_section = f'<h3>📊 User-Role Assignment Matrix</h3>{user_role_matrix_html}' if user_role_matrix_html else ''
+        detailed_perms_content = detailed_perms_html if detailed_perms_html else '<p>No detailed permission data available.</p>'
+        mapping_cards_content = mapping_cards if mapping_cards else '<p>No SAML mappings configured</p>'
+        space_matrix_content = space_matrix_html if space_matrix_html else '<p>No space-specific permissions found. Roles may only have global permissions.</p>'
+        es_privileges_content = es_privileges_html if es_privileges_html else '<p>No Elasticsearch cluster privileges found in roles.</p>'
+
+        # Use template substitution instead of f-strings to avoid escaping issues
+        html_template = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Elastic Role Permission Report with Users</title>
+    <title>Elastic Role Permission Report with Users and Spaces</title>
     <style>
         body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f5f7fa; color: #333; }}
         .container {{ max-width: 1400px; margin: 0 auto; }}
@@ -1279,6 +1432,14 @@ Roles found:
         .role-pill.filtered-out {{ opacity: 0.3; }}
         .search-box {{ width: 100%; padding: 10px; border: 1px solid #dee2e6; border-radius: 5px; margin-bottom: 15px; font-size: 1em; }}
         
+        /* Space Filter Styles (NEW) */
+        .space-filter {{ background: white; border-radius: 10px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+        .space-pills {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+        .space-pill {{ background: #e8f5e8; border: 2px solid #c3e6c3; padding: 8px 15px; border-radius: 20px; cursor: pointer; transition: all 0.3s ease; font-size: 0.9em; }}
+        .space-pill:hover {{ background: #d4f4d4; border-color: #a8d8a8; }}
+        .space-pill.active {{ background: #28a745; color: white; border-color: #28a745; }}
+        .space-pill.filtered-out {{ opacity: 0.3; }}
+        
         /* Tab Styles */
         .tab-container {{ background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 30px; }}
         .tab-nav {{ display: flex; border-bottom: 1px solid #ecf0f1; border-radius: 10px 10px 0 0; overflow: hidden; }}
@@ -1288,14 +1449,17 @@ Roles found:
         .tab-content {{ display: none; padding: 25px; }}
         .tab-content.active {{ display: block; }}
         
-        /* User Styles (NEW) */
+        /* User Styles */
         .user-stats {{ margin: 20px 0; }}
         .user-stat-cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }}
-        .user-stat-card {{ background: white; border-radius: 10px; padding: 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        .user-stat-card {{ background: white; border-radius: 10px; padding: 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: all 0.3s ease; }}
+        .user-stat-card.clickable {{ cursor: pointer; }}
+        .user-stat-card.clickable:hover {{ transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.15); }}
         .user-stat-card.active {{ background: linear-gradient(135deg, #2ecc71 0%, #27ae60 100%); color: white; }}
         .user-stat-card.inactive {{ background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); color: white; }}
         .user-stat-card.no-roles {{ background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%); color: white; }}
         .user-stat-card.multiple-roles {{ background: linear-gradient(135deg, #9b59b6 0%, #8e44ad 100%); color: white; }}
+        .user-stat-card.selected {{ border: 3px solid #fff; box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.5); }}
         .user-stat-card .stat-number {{ font-size: 2em; font-weight: bold; margin-bottom: 5px; }}
         .user-stat-card .stat-label {{ font-size: 0.9em; opacity: 0.9; }}
         
@@ -1337,7 +1501,11 @@ Roles found:
         .info-box ul {{ text-align: left; max-width: 400px; margin: 20px auto; }}
         .info-box p {{ color: #424242; line-height: 1.6; }}
         
-        /* Detailed Permissions Styles (existing) */
+        /* Space Matrix Styles */
+        .space-matrix {{ margin: 20px 0; padding: 20px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #28a745; }}
+        .space-matrix h4 {{ margin-top: 0; color: #2c3e50; }}
+        
+        /* Detailed Permissions Styles */
         .detailed-role-card {{ background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; margin: 15px 0; transition: all 0.3s ease; }}
         .detailed-role-card.filtered-out {{ display: none; }}
         .role-header {{ background: #fff; padding: 20px; border-radius: 8px 8px 0 0; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }}
@@ -1347,7 +1515,8 @@ Roles found:
         .expand-details {{ background: #6c757d; color: white; border: none; padding: 8px 15px; border-radius: 5px; cursor: pointer; font-size: 0.9em; }}
         .expand-details:hover {{ background: #495057; }}
         .role-details {{ padding: 20px; }}
-        .global-section, .features-section, .other-section, .raw-section {{ margin: 15px 0; }}
+        .global-section, .features-section, .other-section, .raw-section, .space-info {{ margin: 15px 0; }}
+        .space-info {{ background: #e3f2fd; padding: 10px; border-radius: 5px; border-left: 3px solid #2196f3; }}
         .global-privilege {{ background: #dc3545; color: white; padding: 3px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; display: inline-block; }}
         .other-privilege {{ background: #6f42c1; color: white; padding: 3px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; display: inline-block; }}
         .feature-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-top: 10px; }}
@@ -1442,25 +1611,25 @@ Roles found:
     <div class="container">
         <div class="header">
             <h1>🔐 Elastic Role Permission Report</h1>
-            <p>Cluster: {cluster_name} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | ✨ With Detailed Sub-Feature Analysis & Local Users</p>
+            <p>Cluster: {cluster_name} | Generated: {timestamp} | ✨ With Detailed Sub-Feature Analysis, Local Users & Space Selection</p>
         </div>
 
         <div class="stats">
             <div class="stat-card">
-                <div class="stat-number" id="filtered-roles">{stats['total_roles']}</div>
+                <div class="stat-number" id="filtered-roles">{total_roles}</div>
                 <div class="stat-label">Roles Shown</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">{stats['total_mappings']}</div>
+                <div class="stat-number">{total_mappings}</div>
                 <div class="stat-label">SAML Mappings</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number" id="filtered-users">{stats['total_users']}</div>
+                <div class="stat-number" id="filtered-users">{total_users}</div>
                 <div class="stat-label">Local Users</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">{stats['total_features']}</div>
-                <div class="stat-label">Kibana Features</div>
+                <div class="stat-number">{total_spaces}</div>
+                <div class="stat-label">Kibana Spaces</div>
             </div>
         </div>
 
@@ -1475,11 +1644,14 @@ Roles found:
             </div>
         </div>
 
+        {space_filter_html}
+
         <div class="tab-container">
             <div class="tab-nav">
                 <button class="tab-btn active" onclick="switchTab('detailed-tab')">🔬 Detailed Permissions</button>
                 <button class="tab-btn" onclick="switchTab('users-tab')">👥 Local Users</button>
                 <button class="tab-btn" onclick="switchTab('kibana-tab')">🎛️ Kibana Overview</button>
+                <button class="tab-btn" onclick="switchTab('spaces-tab')">🏠 Spaces</button>
                 <button class="tab-btn" onclick="switchTab('cluster-tab')">⚙️ Cluster Privileges</button>
             </div>
             
@@ -1495,7 +1667,7 @@ Roles found:
                         minimal permissions, and raw privilege strings from Elasticsearch.
                     </p>
                     <div class="detailed-permissions" id="detailed-permissions">
-                        {detailed_perms_html if detailed_perms_html else '<p>No detailed permission data available.</p>'}
+                        {detailed_perms_content}
                     </div>
                 </div>
             </div>
@@ -1514,7 +1686,7 @@ Roles found:
                         {users_html}
                     </div>
                     
-                    {'<h3>📊 User-Role Assignment Matrix</h3>' + user_role_matrix_html if user_role_matrix_html else ''}
+                    {user_role_matrix_section}
                 </div>
             </div>
             
@@ -1524,14 +1696,10 @@ Roles found:
                 </div>
                 
                 <div class="section-content">
-                    <h2>🏠 Space-Specific Permissions</h2>
-                    <div class="space-cards" id="space-cards">
-                        {space_cards_html}
-                    </div>
-                </div>
-
-                <div class="section-content">
-                    <h2>📊 Role Permission Matrix</h2>
+                    <h2>📊 Role Permission Matrix (Global View)</h2>
+                    <p style="color: #7f8c8d; margin-bottom: 20px;">
+                        This matrix shows the highest permission level each role has across all spaces for each feature.
+                    </p>
                     <div class="permission-matrix">
                         <table class="matrix-table">
                             <thead>
@@ -1550,7 +1718,7 @@ Roles found:
                 <div class="section-content">
                     <h2>🔗 SAML Role Mappings</h2>
                     <div class="saml-mapping" id="saml-mappings">
-                        {mapping_cards if mapping_cards else '<p>No SAML mappings configured</p>'}
+                        {mapping_cards_content}
                     </div>
                 </div>
 
@@ -1560,8 +1728,24 @@ Roles found:
                         {role_distribution}
                     </div>
                     <p style="color: #7f8c8d; font-style: italic; margin-top: 20px;">
-                        This analysis categorizes your {stats['total_roles']} roles by their apparent function based on naming patterns.
+                        This analysis categorizes your {total_roles} roles by their apparent function based on naming patterns.
                     </p>
+                </div>
+            </div>
+            
+            <div id="spaces-tab" class="tab-content">
+                <div id="filter-info-spaces" class="filter-info" style="display: none;">
+                    Showing space permissions for: <strong id="filtered-space-name"></strong>
+                </div>
+                
+                <div class="section-content">
+                    <h2>🏠 Space-Specific Permission Matrices</h2>
+                    <p style="color: #7f8c8d; margin-bottom: 20px;">
+                        Select a space above to see which roles have permissions in that specific space.
+                    </p>
+                    <div id="space-matrices">
+                        {space_matrix_content}
+                    </div>
                 </div>
             </div>
             
@@ -1573,7 +1757,7 @@ Roles found:
                 <div class="section-content">
                     <h2>⚙️ Elasticsearch Cluster Privileges</h2>
                     <div class="es-privileges" id="es-privileges">
-                        {es_privileges_html if es_privileges_html else '<p>No Elasticsearch cluster privileges found in roles.</p>'}
+                        {es_privileges_content}
                     </div>
                     <p style="color: #7f8c8d; font-style: italic;">
                         Shows the Elasticsearch cluster and index-level permissions granted by each role.
@@ -1584,14 +1768,16 @@ Roles found:
     </div>
     
     <script>
-        // Role and user data for filtering
-        const roleData = {json.dumps([role_name for role_name in roles.keys()])};
-        const roleSpaceData = {json.dumps({role_name: role_data.get('space_permissions', {}) for role_name, role_data in roles.items()})};
-        const userRoleMapping = {json.dumps(users_analysis.get('role_user_mapping', {})) if users_analysis['available'] else {}};
-        const userDetails = {json.dumps(users_analysis.get('user_details', {})) if users_analysis['available'] else {}};
+        // Role, user, and space data for filtering
+        const roleData = {role_data_json};
+        const spaceData = {space_data_json};
+        const roleSpaceData = {role_space_data_json};
+        const userRoleMapping = {user_role_mapping_json};
+        const userDetails = {user_details_json};
         let selectedRole = null;
+        let selectedSpace = null;
         
-        // Initialize role pills
+        // Initialize role and space pills
         function initializeRolePills() {{
             const pillsContainer = document.getElementById('role-pills');
             roleData.forEach(role => {{
@@ -1607,6 +1793,7 @@ Roles found:
         // Filter by role
         function filterByRole(roleName) {{
             selectedRole = roleName;
+            selectedSpace = null; // Clear space filter when role is selected
             
             // Update pill states
             document.querySelectorAll('.role-pill').forEach(pill => {{
@@ -1617,6 +1804,66 @@ Roles found:
                 }}
             }});
             
+            // Clear space pill states
+            document.querySelectorAll('.space-pill').forEach(pill => {{
+                pill.classList.remove('active');
+            }});
+            
+            // Apply role filtering to all relevant elements
+            applyRoleFilter(roleName);
+            
+            // Show filter info
+            updateFilterInfo('role', roleName);
+            
+            // Show clear button
+            document.getElementById('clear-btn').style.display = 'inline-block';
+            
+            // Update filtered counts
+            document.getElementById('filtered-roles').textContent = '1';
+            
+            // Count filtered users
+            const filteredUserCount = userRoleMapping[roleName] ? userRoleMapping[roleName].length : 0;
+            document.getElementById('filtered-users').textContent = filteredUserCount.toString();
+        }}
+        
+        // Filter by space (NEW)
+        function filterBySpace(spaceName) {{
+            selectedSpace = spaceName;
+            selectedRole = null; // Clear role filter when space is selected
+            
+            // Update space pill states
+            document.querySelectorAll('.space-pill').forEach(pill => {{
+                if (pill.getAttribute('data-space') === spaceName) {{
+                    pill.classList.add('active');
+                }} else {{
+                    pill.classList.remove('active');
+                }}
+            }});
+            
+            // Clear role pill states
+            document.querySelectorAll('.role-pill').forEach(pill => {{
+                pill.classList.remove('active');
+            }});
+            
+            // Apply space filtering
+            applySpaceFilter(spaceName);
+            
+            // Show specific space matrix
+            showSpaceMatrix(spaceName);
+            
+            // Show filter info
+            updateFilterInfo('space', spaceName);
+            
+            // Show clear button
+            document.getElementById('clear-btn').style.display = 'inline-block';
+            
+            // Update filtered counts
+            const rolesInSpace = countRolesInSpace(spaceName);
+            document.getElementById('filtered-roles').textContent = rolesInSpace.toString();
+        }}
+        
+        // Apply role filtering to all elements
+        function applyRoleFilter(roleName) {{
             // Filter matrix table rows
             document.querySelectorAll('#matrix-tbody tr').forEach(row => {{
                 const roleCell = row.querySelector('td strong');
@@ -1689,108 +1936,117 @@ Roles found:
                     card.classList.add('filtered-out');
                 }}
             }});
-            
-            // Update space cards
-            updateSpaceCards(roleName);
-            
-            // Show filter info
-            document.getElementById('filter-info-kibana').style.display = 'block';
-            document.getElementById('filter-info-cluster').style.display = 'block';
-            document.getElementById('filter-info-detailed').style.display = 'block';
-            document.getElementById('filter-info-users').style.display = 'block';
-            document.getElementById('filtered-role-name-kibana').textContent = roleName;
-            document.getElementById('filtered-role-name-cluster').textContent = roleName;
-            document.getElementById('filtered-role-name-detailed').textContent = roleName;
-            document.getElementById('filtered-role-name-users').textContent = roleName;
-            
-            // Show clear button
-            document.getElementById('clear-btn').style.display = 'inline-block';
-            
-            // Update filtered counts
-            document.getElementById('filtered-roles').textContent = '1';
-            
-            // Count filtered users
-            const filteredUserCount = userRoleMapping[roleName] ? userRoleMapping[roleName].length : 0;
-            document.getElementById('filtered-users').textContent = filteredUserCount.toString();
         }}
         
-        // Update space cards based on selected role
-        function updateSpaceCards(roleName) {{
-            const spaceContainer = document.getElementById('space-cards');
-            
-            // Get role space data
-            const selectedRoleSpaces = roleSpaceData[roleName] || {{}};
-            
-            if (Object.keys(selectedRoleSpaces).length === 0) {{
-                // No space data available, show default message
-                spaceContainer.innerHTML = `
-                    <div class="space-card">
-                        <h4>🏠 Default Space</h4>
-                        <div class="space-features">
-                            <div class="feature-row">
-                                <span class="feature-name">Role: <strong>${{roleName}}</strong></span>
-                                <span class="feature-permission read">Global permissions apply to all spaces</span>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }} else {{
-                // Build space cards from actual data
-                let spaceCardsHtml = '';
-                for (const [spaceName, spaceFeatures] of Object.entries(selectedRoleSpaces)) {{
-                    let featureRows = '';
-                    let hasPermissions = false;
-                    
-                    for (const [feature, permission] of Object.entries(spaceFeatures)) {{
-                        if (permission !== 'NONE') {{
-                            hasPermissions = true;
-                            const featureDisplay = feature.replace(/_/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase());
-                            const permClass = permission.toLowerCase();
-                            featureRows += `
-                                <div class="feature-row">
-                                    <span class="feature-name">${{featureDisplay}}</span>
-                                    <span class="feature-permission ${{permClass}}">${{permission}}</span>
-                                </div>
-                            `;
-                        }}
-                    }}
-                    
+        // Apply space filtering (NEW)
+        function applySpaceFilter(spaceName) {{
+            // Filter roles that have permissions in this space
+            const rolesInSpace = [];
+            for (const [roleName, spaces] of Object.entries(roleSpaceData)) {{
+                if (spaces[spaceName]) {{
+                    // Check if role has any non-NONE permissions in this space
+                    const hasPermissions = Object.values(spaces[spaceName]).some(perm => perm !== 'NONE');
                     if (hasPermissions) {{
-                        spaceCardsHtml += `
-                            <div class="space-card">
-                                <h4>🏠 ${{spaceName}} Space</h4>
-                                <div class="space-features">
-                                    ${{featureRows}}
-                                </div>
-                            </div>
-                        `;
+                        rolesInSpace.push(roleName);
                     }}
+                }}
+            }}
+            
+            // Filter matrix table rows
+            document.querySelectorAll('#matrix-tbody tr').forEach(row => {{
+                const roleCell = row.querySelector('td strong');
+                if (roleCell && rolesInSpace.includes(roleCell.textContent)) {{
+                    row.classList.remove('filtered-out');
+                }} else {{
+                    row.classList.add('filtered-out');
+                }}
+            }});
+            
+            // Filter other elements similarly
+            document.querySelectorAll('.detailed-role-card').forEach(card => {{
+                const cardTitle = card.querySelector('.role-header h4');
+                if (cardTitle && rolesInSpace.includes(cardTitle.textContent)) {{
+                    card.classList.remove('filtered-out');
+                }} else {{
+                    card.classList.add('filtered-out');
+                }}
+            }});
+            
+            document.querySelectorAll('.es-role-card').forEach(card => {{
+                const cardTitle = card.querySelector('h4');
+                if (cardTitle && rolesInSpace.includes(cardTitle.textContent)) {{
+                    card.classList.remove('filtered-out');
+                }} else {{
+                    card.classList.add('filtered-out');
+                }}
+            }});
+        }}
+        
+        // Show specific space matrix (NEW)
+        function showSpaceMatrix(spaceName) {{
+            // Hide all space matrices
+            document.querySelectorAll('.space-matrix').forEach(matrix => {{
+                matrix.style.display = 'none';
+            }});
+            
+            // Show the selected space matrix
+            const targetMatrix = document.getElementById(`space-matrix-${{spaceName}}`);
+            if (targetMatrix) {{
+                targetMatrix.style.display = 'block';
+            }}
+        }}
+        
+        // Count roles in space (NEW)
+        function countRolesInSpace(spaceName) {{
+            let count = 0;
+            for (const [roleName, spaces] of Object.entries(roleSpaceData)) {{
+                if (spaces[spaceName]) {{
+                    const hasPermissions = Object.values(spaces[spaceName]).some(perm => perm !== 'NONE');
+                    if (hasPermissions) {{
+                        count++;
+                    }}
+                }}
+            }}
+            return count;
+        }}
+        
+        // Update filter info display
+        function updateFilterInfo(filterType, filterValue) {{
+            if (filterType === 'role') {{
+                document.getElementById('filter-info-kibana').style.display = 'block';
+                document.getElementById('filter-info-cluster').style.display = 'block';
+                document.getElementById('filter-info-detailed').style.display = 'block';
+                document.getElementById('filter-info-users').style.display = 'block';
+                document.getElementById('filtered-role-name-kibana').textContent = filterValue;
+                document.getElementById('filtered-role-name-cluster').textContent = filterValue;
+                document.getElementById('filtered-role-name-detailed').textContent = filterValue;
+                document.getElementById('filtered-role-name-users').textContent = filterValue;
+                
+                // Hide space filter info
+                const spaceInfo = document.getElementById('filter-info-spaces');
+                if (spaceInfo) spaceInfo.style.display = 'none';
+            }} else if (filterType === 'space') {{
+                const spaceInfo = document.getElementById('filter-info-spaces');
+                if (spaceInfo) {{
+                    spaceInfo.style.display = 'block';
+                    document.getElementById('filtered-space-name').textContent = filterValue;
                 }}
                 
-                if (spaceCardsHtml) {{
-                    spaceContainer.innerHTML = spaceCardsHtml;
-                }} else {{
-                    spaceContainer.innerHTML = `
-                        <div class="space-card">
-                            <h4>🏠 Default Space</h4>
-                            <div class="space-features">
-                                <div class="feature-row">
-                                    <span class="feature-name">Role: <strong>${{roleName}}</strong></span>
-                                    <span class="feature-permission none">No specific space permissions defined</span>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }}
+                // Hide role filter info
+                document.getElementById('filter-info-kibana').style.display = 'none';
+                document.getElementById('filter-info-cluster').style.display = 'none';
+                document.getElementById('filter-info-detailed').style.display = 'none';
+                document.getElementById('filter-info-users').style.display = 'none';
             }}
         }}
         
         // Clear filter
         function clearFilter() {{
             selectedRole = null;
+            selectedSpace = null;
             
             // Reset pill states
-            document.querySelectorAll('.role-pill').forEach(pill => {{
+            document.querySelectorAll('.role-pill, .space-pill').forEach(pill => {{
                 pill.classList.remove('active');
             }});
             
@@ -1800,11 +2056,18 @@ Roles found:
                 element.style.display = ''; // Reset display property
             }});
             
+            // Hide all space matrices
+            document.querySelectorAll('.space-matrix').forEach(matrix => {{
+                matrix.style.display = 'none';
+            }});
+            
             // Hide filter info
             document.getElementById('filter-info-kibana').style.display = 'none';
             document.getElementById('filter-info-cluster').style.display = 'none';
             document.getElementById('filter-info-detailed').style.display = 'none';
             document.getElementById('filter-info-users').style.display = 'none';
+            const spaceInfo = document.getElementById('filter-info-spaces');
+            if (spaceInfo) spaceInfo.style.display = 'none';
             
             // Hide clear button
             document.getElementById('clear-btn').style.display = 'none';
@@ -1821,9 +2084,8 @@ Roles found:
                 pill.style.display = 'block';
             }});
             
-            // Reset space cards
-            const spaceContainer = document.getElementById('space-cards');
-            spaceContainer.innerHTML = '<div class="no-spaces">Select a role above to see space-specific permissions</div>';
+            // Also clear user category filter
+            clearUserFilter();
         }}
         
         // Search roles
@@ -1896,6 +2158,131 @@ Roles found:
             }}
         }}
         
+        // User filtering variables
+        let selectedUserCategory = null;
+        
+        // Filter users by category
+        function filterUsersByCategory(category) {{
+            selectedUserCategory = category;
+            
+            // Update stat card states
+            document.querySelectorAll('.user-stat-card').forEach(card => {{
+                if (card.getAttribute('data-category') === category) {{
+                    card.classList.add('selected');
+                }} else {{
+                    card.classList.remove('selected');
+                }}
+            }});
+            
+            // Filter user cards
+            document.querySelectorAll('.user-card').forEach(card => {{
+                const username = card.querySelector('.user-info h4').textContent;
+                const user = userDetails[username];
+                let shouldShow = false;
+                
+                if (user) {{
+                    switch(category) {{
+                        case 'active':
+                            shouldShow = user.enabled === true;
+                            break;
+                        case 'inactive':
+                            shouldShow = user.enabled === false;
+                            break;
+                        case 'no-roles':
+                            shouldShow = user.role_count === 0;
+                            break;
+                        case 'multiple-roles':
+                            shouldShow = user.role_count > 1;
+                            break;
+                    }}
+                }}
+                
+                if (shouldShow) {{
+                    card.classList.remove('filtered-out');
+                }} else {{
+                    card.classList.add('filtered-out');
+                }}
+            }});
+            
+            // Filter user matrix rows
+            document.querySelectorAll('#user-matrix-tbody tr').forEach(row => {{
+                const userCell = row.querySelector('td strong');
+                if (userCell) {{
+                    const username = userCell.textContent;
+                    const user = userDetails[username];
+                    let shouldShow = false;
+                    
+                    if (user) {{
+                        switch(category) {{
+                            case 'active':
+                                shouldShow = user.enabled === true;
+                                break;
+                            case 'inactive':
+                                shouldShow = user.enabled === false;
+                                break;
+                            case 'no-roles':
+                                shouldShow = user.role_count === 0;
+                                break;
+                            case 'multiple-roles':
+                                shouldShow = user.role_count > 1;
+                                break;
+                        }}
+                    }}
+                    
+                    if (shouldShow) {{
+                        row.classList.remove('filtered-out');
+                    }} else {{
+                        row.classList.add('filtered-out');
+                    }}
+                }}
+            }});
+            
+            // Show filter info
+            const filterInfo = document.getElementById('user-filter-info');
+            const filterText = document.getElementById('user-filter-text');
+            
+            let categoryText = '';
+            switch(category) {{
+                case 'active':
+                    categoryText = 'Active Users';
+                    break;
+                case 'inactive':
+                    categoryText = 'Inactive Users';
+                    break;
+                case 'no-roles':
+                    categoryText = 'Users Without Roles';
+                    break;
+                case 'multiple-roles':
+                    categoryText = 'Users with Multiple Roles';
+                    break;
+            }}
+            
+            filterText.textContent = categoryText;
+            filterInfo.style.display = 'block';
+        }}
+        
+        // Clear user filter
+        function clearUserFilter() {{
+            selectedUserCategory = null;
+            
+            // Reset stat card states
+            document.querySelectorAll('.user-stat-card').forEach(card => {{
+                card.classList.remove('selected');
+            }});
+            
+            // Show all user cards and matrix rows
+            document.querySelectorAll('.user-card.filtered-out').forEach(card => {{
+                card.classList.remove('filtered-out');
+            }});
+            
+            document.querySelectorAll('#user-matrix-tbody tr.filtered-out').forEach(row => {{
+                row.classList.remove('filtered-out');
+            }});
+            
+            // Hide filter info
+            document.getElementById('user-filter-info').style.display = 'none';
+        }}
+        
         // Initialize on page load
         window.addEventListener('load', () => {{
             initializeRolePills();
@@ -1931,31 +2318,62 @@ Roles found:
     </script>
 </body>
 </html>"""
+
+        # Now format the template with all the variables
+        html_content = html_template.format(
+            cluster_name=cluster_name,
+            timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            total_roles=stats['total_roles'],
+            total_mappings=stats['total_mappings'],
+            total_users=stats['total_users'],
+            total_spaces=stats.get('total_spaces', 0),
+            space_filter_html=space_filter_html,
+            feature_headers=feature_headers,
+            matrix_rows=matrix_rows,
+            detailed_perms_content=detailed_perms_content,
+            user_stats_html=user_stats_html,
+            users_html=users_html,
+            user_role_matrix_section=user_role_matrix_section,
+            mapping_cards_content=mapping_cards_content,
+            role_distribution=role_distribution,
+            space_matrix_content=space_matrix_content,
+            es_privileges_content=es_privileges_content,
+            role_data_json=role_data_json,
+            space_data_json=space_data_json,
+            role_space_data_json=role_space_data_json,
+            user_role_mapping_json=user_role_mapping_json,
+            user_details_json=user_details_json
+        )
         
-        return html_template
+        return html_content
     
     def create_csv_export(self, file_path: str):
-        """Create enhanced CSV export of role permissions and users with detailed breakdown"""
+        """Create enhanced CSV export of role permissions, users, and spaces with detailed breakdown"""
         import csv
         
         roles = self.analysis['roles']
         features = self.analysis['kibana_features']
         users_analysis = self.analysis['users']
+        all_spaces = self.analysis.get('all_spaces', [])
         
         with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
             
-            # Enhanced header row with detailed columns
-            header = ['Role', 'Global_Privileges', 'Raw_Privilege_Count'] + [f'{feature}_Level' for feature in features] + [f'{feature}_Raw_Privileges' for feature in features]
+            # Enhanced header row with detailed columns including spaces
+            header = ['Role', 'Spaces', 'Global_Privileges', 'Raw_Privilege_Count'] + [f'{feature}_Level' for feature in features] + [f'{feature}_Raw_Privileges' for feature in features]
             writer.writerow(header)
             
             # Role data rows
             for role_name, role_data in roles.items():
                 perms = role_data['kibana_permissions']
                 detailed_perms = role_data.get('detailed_permissions', {})
+                role_spaces = role_data.get('spaces', [])
                 
                 # Basic info
                 row = [role_name]
+                
+                # Spaces
+                row.append('; '.join(role_spaces) if role_spaces else 'Default')
                 
                 # Global privileges
                 global_privs = detailed_perms.get('global_privileges', [])
@@ -1977,6 +2395,30 @@ Roles found:
                     row.append('; '.join(feature_privs) if feature_privs else 'None')
                 
                 writer.writerow(row)
+            
+            # Add empty rows to separate sections
+            writer.writerow([])
+            writer.writerow(['=== SPACE-SPECIFIC PERMISSIONS ==='])
+            writer.writerow([])
+            
+            # Space-specific permissions section (NEW)
+            if all_spaces:
+                for space_name in all_spaces:
+                    writer.writerow([f'=== SPACE: {space_name} ==='])
+                    writer.writerow(['Role'] + [f'{feature}_Level' for feature in features])
+                    
+                    for role_name, role_data in roles.items():
+                        space_perms = role_data.get('space_permissions', {}).get(space_name, {})
+                        if space_perms:
+                            # Check if role has any permissions in this space
+                            has_permissions = any(perm != 'NONE' for perm in space_perms.values())
+                            if has_permissions:
+                                space_row = [role_name]
+                                for feature in features:
+                                    space_row.append(space_perms.get(feature, 'NONE'))
+                                writer.writerow(space_row)
+                    
+                    writer.writerow([])  # Empty row after each space
             
             # Add empty rows to separate sections
             writer.writerow([])
@@ -2027,6 +2469,13 @@ Roles found:
                         ])
             else:
                 writer.writerow(['User data not available or no users found'])
+            
+            # Add spaces summary
+            writer.writerow([])
+            writer.writerow(['=== SPACES SUMMARY ==='])
+            writer.writerow([])
+            writer.writerow(['Total Spaces Found', len(all_spaces)])
+            writer.writerow(['Space Names', '; '.join(all_spaces) if all_spaces else 'Default only'])
 
 def main():
     root = tk.Tk()
