@@ -1,5 +1,4 @@
-# Elastic Role Permission Mapper (v4 Gold)
-
+# Elastic Role Permission Mapper
 A comprehensive GUI tool for analyzing and visualizing **Elastic Cloud and Local Elasticsearch/Kibana permissions**, including **local user analysis** and **detailed sub-feature permission breakdown**.
 
 ## 🎯 Overview
